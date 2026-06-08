@@ -244,10 +244,11 @@ theme_coral <- function(base_size = 9) {
     )
 }
 
-# species palette: viridis D, one color per species
-n_species <- length(unique(data$class))
-pal <- setNames(viridisLite::viridis(n_species, option = "D", begin = 0.05, end = 0.92),
-                sort(unique(data$class)))
+# canonical species palette — named by full species name so every scale_color/fill_manual
+# call resolves to the same color regardless of which species appear in a given plot
+sp_levels <- sort(unique(as.character(data$class)))
+pal <- setNames(viridisLite::viridis(length(sp_levels), option = "D", begin = 0.05, end = 0.92),
+                sp_levels)
 
 # site palette: 2 viridis colors for site-level plots
 n_sites  <- length(unique(data$site))
@@ -255,8 +256,23 @@ site_pal <- setNames(viridisLite::viridis(max(n_sites, 2), option = "D",
                                           begin = 0.15, end = 0.75)[seq_len(n_sites)],
                      sort(unique(data$zone)))
 
-# figure target width: 90% of A4 text column (16 cm) = 14.4 cm ≈ 5.67 in
-fig_w <- 5.67
+# species code lookup: full name → 4-letter code (SSID, DLAB, etc.)
+sp_codes <- data %>% distinct(class, code) %>% { setNames(.$code, .$class) }
+
+# species label with n colonies: plain two-line label for axis/strip
+sp_n <- data %>% distinct(colony_id, class) %>% count(class, name = "n_col") %>%
+  { setNames(.$n_col, .$class) }
+sp_labels_n <- setNames(
+  paste0(sp_codes[names(sp_n)], "
+n = ", sp_n),
+  names(sp_n)
+)
+
+# figure dimensions: two aspect ratios used throughout (300 DPI, px)
+fig_sq_w  <- 945   # squarish  945 × 945 px  (half of document width)
+fig_sq_h  <- 945
+fig_ls_w  <- 1890  # landscape 1890 × 945 px (full document width, 2:1 ratio)
+fig_ls_h  <- 945
 
 # --- 0. Sample sizes ---
 sample_sizes <- data %>%
@@ -312,45 +328,19 @@ cover_sp_mean <- cover_sp %>%
   group_by(date, class) %>%
   summarise(mean_pct = mean(pct_cover_sp), .groups = "drop")
 
-# bar width: 70% of minimum survey-to-survey interval (days, matching Date scale)
-cover_bar_w <- as.numeric(median(diff(sort(unique(cover_sp_mean$date))))) * 0.7
-
 pC1 <- ggplot(cover_sp_mean, aes(x = date, y = mean_pct, fill = class)) +
-  geom_col(alpha = 0.85, width = cover_bar_w) +
-  scale_fill_manual(values = pal) +
+  geom_area(alpha = 0.85, position = "stack") +
+  scale_fill_manual(values = pal, labels = sp_codes) +
   scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
   scale_y_continuous(labels = \(x) paste0(x, "%"),
                      expand = expansion(mult = c(0, 0.03))) +
-  labs(x = NULL, y = "Mean cover (% of 25 m²)", fill = NULL,
-       title = "Species composition of total coral cover over time") +
+  labs(x = "Survey date", y = "Mean cover (% of 25 m²)", fill = NULL) +
   theme_coral() +
-  theme(legend.position = "bottom",
-        legend.text     = element_text(face = "italic", family = sp_font)) +
-  guides(fill = guide_legend(ncol = 3))
+  theme(legend.position = "top") +
+  guides(fill = guide_legend(nrow = 1))
 
-# Plot C2: per-plot cover trajectories with model trend line
-pC2 <- ggplot(cover, aes(x = date, y = pct_cover)) +
-  geom_line(aes(group = plot_id, color = zone), alpha = 0.45, linewidth = 0.8) +
-  geom_point(aes(color = zone), size = 1.8, alpha = 0.75) +
-  geom_ribbon(data = cover_trend,
-              aes(x = date, ymin = pct_cover_lo, ymax = pct_cover_hi),
-              inherit.aes = FALSE, alpha = 0.10, fill = accent_col) +
-  geom_line(data = cover_trend, aes(x = date, y = pct_cover),
-            inherit.aes = FALSE, color = "grey15", linewidth = 0.8) +
-  scale_color_manual(values = site_pal) +
-  scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
-  scale_y_continuous(labels = \(x) paste0(round(x, 1), "%")) +
-  labs(x = NULL, y = "Total cover (% of 25 m²)", color = "Site",
-       title = "Total cover trajectory per plot",
-       subtitle = "Dark line = LMM trend  |  Band = 95% CI") +
-  theme_coral() +
-  theme(legend.position = "bottom")
-
-p_community <- pC1 / pC2 +
-  plot_layout(heights = c(1, 1))
-print(p_community)
-ggsave(file.path(plots_dir, "01_community_cover.jpeg"), p_community,
-       width = fig_w, height = 4.5, dpi = 300, units = "in")  # 2 stacked time-series
+ggsave(file.path(plots_dir, "01_community_cover_composition.jpeg"), pC1,
+       width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -405,9 +395,8 @@ pd <- ggplot(data.frame(re = re_vals), aes(sample = re)) +
   theme_coral()
 
 p_assumptions <- (pa | pb) / (pc | pd)
-print(p_assumptions)
 ggsave(file.path(plots_dir, "00_lmm_assumption_checks.jpeg"), p_assumptions,
-       width = fig_w, height = 4.0, dpi = 300, units = "in")
+       width = fig_ls_w, height = fig_ls_w, dpi = 300, units = "px")
 
 
 # model 1b: species x size_z interaction — only run if size_z is significant in model_base
@@ -482,12 +471,11 @@ pG1 <- ggplot() +
                   size = 0.3, alpha = 0.7) +
   scale_color_manual(values = pal, guide = "none") +
   scale_x_date(date_breaks = "1 year", date_labels = "'%y") +
-  facet_wrap(~ class, scales = "free_y", ncol = 3,
-             labeller = label_wrap_gen(width = 16)) +
-  labs(x = NULL, y = "Colony area (cm²)",
-       title = "Species growth trajectories",
-       subtitle = "Line = LMM prediction at mean size  |  Points = observed mean ± SE") +
-  theme_coral()
+  facet_wrap(~ class, scales = "free_y", nrow = 2,
+             labeller = as_labeller(sp_labels_n)) +
+  labs(x = "Survey date", y = "Colony area (cm²)") +
+  theme_coral() +
+  theme(strip.text = element_text(family = "Helvetica", face = "plain", size = 7))
 
 # Plot G2: per-species log-area growth rate from model coefficients
 # SE for non-reference species requires propagating variance of PAST slope + interaction:
@@ -529,18 +517,16 @@ pG2 <- ggplot(growth_coefs,
   geom_text(aes(y = pct_yr_hi, label = sig),
             vjust = -0.5, size = 3.5, color = "grey30") +
   scale_color_manual(values = pal, guide = "none") +
+  scale_x_discrete(labels = sp_labels_n) +
   coord_flip() +
-  labs(x = NULL, y = "Annual growth rate (% per year)",
-       title = "Per-species annual growth rate",
-       subtitle = "exp(slope × 365) − 1  |  Error bars = propagated SE") +
+  labs(x = NULL, y = "Annual growth rate (% per year)") +
   theme_coral() +
-  theme(axis.text.y = element_text(face = "italic", family = sp_font))
+  theme(axis.text.y = element_text(size = 7))
 
-p_growth <- pG1 / pG2 +
-  plot_layout(heights = c(2, 1))
-print(p_growth)
-ggsave(file.path(plots_dir, "02_species_growth_trajectories.jpeg"), p_growth,
-       width = fig_w, height = 5.5, dpi = 300, units = "in")  # 3-row facet grid + bar
+ggsave(file.path(plots_dir, "02a_growth_trajectories.jpeg"), pG1,
+       width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
+ggsave(file.path(plots_dir, "02b_growth_rates.jpeg"), pG2,
+       width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -564,14 +550,16 @@ turnover <- data %>%
   ungroup()
 
 # aggregate per-colony first so each colony gets equal weight regardless of survey count
-turnover_sp <- turnover %>%
+turnover_colony <- turnover %>%
   group_by(colony_id, class) %>%
   summarise(
     mean_gained = mean(gained_pct),
     mean_lost   = mean(lost_pct),
     net_change  = mean(net_pct),
     .groups     = "drop"
-  ) %>%
+  )
+
+turnover_sp <- turnover_colony %>%
   group_by(class) %>%
   summarise(
     mean_gained = mean(mean_gained),
@@ -580,6 +568,18 @@ turnover_sp <- turnover %>%
     se_net      = sd(net_change) / sqrt(n()),
     .groups     = "drop"
   )
+
+# one-sample t-test per species: is net annual change significantly different from zero?
+# H0: mean net change = 0 (no net growth or loss)
+turnover_ttest <- turnover_colony %>%
+  group_by(class) %>%
+  summarise(
+    t_p = tryCatch(t.test(net_change, mu = 0)$p.value, error = \(e) NA_real_),
+    .groups = "drop"
+  ) %>%
+  mutate(t_sig = sig_stars(t_p))
+
+turnover_sp <- turnover_sp %>% left_join(turnover_ttest, by = "class")
 
 # Plot T1: growth vs loss diverging bar chart (% per year)
 turnover_long <- turnover_sp %>%
@@ -601,21 +601,22 @@ pT1 <- ggplot(turnover_long,
                     ymin = net_change - se_net, ymax = net_change + se_net),
                 inherit.aes = FALSE, width = 0.18, linewidth = 0.65, color = "grey10") +
   geom_hline(yintercept = 0, color = accent_col, linewidth = 0.55) +
+  geom_text(data = turnover_sp,
+            aes(x = reorder(class, net_change, mean),
+                y = net_change + se_net, label = t_sig),
+            inherit.aes = FALSE, hjust = -0.3, size = 3.2, color = "grey20") +
   scale_fill_manual(values = c(
     "Gained" = viridisLite::viridis(4, option = "D")[3],
     "Lost"   = viridisLite::viridis(4, option = "D")[1]
   )) +
+  scale_x_discrete(labels = sp_codes) +
   coord_flip() +
-  labs(x = NULL, y = "Mean annual change (% of colony area per year)", fill = NULL,
-       title = "Growth vs. tissue loss balance per species",
-       subtitle = "Bars = mean gained/lost per year  |  Dot = net change ± SE") +
+  labs(x = NULL, y = "Mean annual change (% of colony area per year)", fill = NULL) +
   theme_coral() +
-  theme(axis.text.y  = element_text(face = "italic", family = sp_font),
-        legend.position = "none")
+  theme(legend.position = "none")
 
-print(pT1)
 ggsave(file.path(plots_dir, "03_turnover_balance.jpeg"), pT1,
-       width = fig_w, height = 3.8, dpi = 300, units = "in")  # 8-species horiz bars
+       width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -655,14 +656,14 @@ pS1 <- ggplot() +
   geom_line(data = growth_pred,
             aes(x = size_z, y = pred_pct),
             color = accent_col, linewidth = 1.1) +
-  scale_color_manual(values = pal, name = NULL) +
+  scale_color_manual(values = pal, name = NULL, labels = sp_codes) +
   labs(x = "Initial size z-score (within species)",
-       y = "Growth rate (% per year)",
-       title = "Colony size vs. growth rate",
-       subtitle = "Larger initial colonies grow slower  |  Line = model (PAST)") +
+       y = "Growth rate (% per year)") +
   theme_coral() +
-  theme(legend.position = "right",
-        legend.text = element_text(face = "italic", family = sp_font, size = 7))
+  theme(legend.position  = c(0.98, 0.98),
+        legend.justification = c("right", "top"),
+        legend.background = element_rect(fill = alpha("white", 0.7), color = NA),
+        legend.text = element_text(size = 7))
 
 # Plot S2: size class composition per species — in-bar labels, no legend
 pS2_dat <- data %>%
@@ -676,27 +677,19 @@ pS2_dat <- data %>%
 
 pS2 <- ggplot(pS2_dat, aes(x = class, y = prop, fill = size_class)) +
   geom_col(alpha = 0.85, width = 0.6) +
-  geom_text(data = \(d) filter(d, prop >= 0.18),
-            aes(y = mid,
-                label = c(small = "S", medium = "M", large = "L")[size_class],
-                color = size_class),
-            size = 2.4, fontface = "bold") +
   scale_fill_manual(values = pal_size) +
-  scale_color_manual(values = c(small = "white", medium = "white", large = "grey10"),
-                     guide = "none") +
   scale_y_continuous(labels = scales::percent_format(),
                      breaks = c(0, 0.5, 1)) +
+  scale_x_discrete(labels = sp_codes) +
   coord_flip() +
-  labs(x = NULL, y = "Proportion", fill = NULL,
-       title = "Size distribution") +
+  labs(x = NULL, y = "Proportion", fill = NULL) +
   guides(fill = "none") +
-  theme_coral() +
-  theme(axis.text.y = element_text(face = "italic", family = sp_font))
+  theme_coral()
 
-p_size <- pS1 + pS2
-print(p_size)
-ggsave(file.path(plots_dir, "04_initial_size_effects.jpeg"), p_size,
-       width = fig_w, height = 3.5, dpi = 300, units = "in")  # 2 side-by-side panels
+ggsave(file.path(plots_dir, "04a_size_vs_growth.jpeg"), pS1,
+       width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
+ggsave(file.path(plots_dir, "04b_size_distribution.jpeg"), pS2,
+       width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -774,13 +767,13 @@ pM1 <- ggplot(cld_fate_class_plot,
   geom_text(aes(y = asymp.UCL, label = .group),
             hjust = -0.4, size = 4.0, color = "grey30", fontface = "bold") +
   scale_color_manual(values = pal, guide = "none") +
+  scale_x_discrete(labels = sp_labels_n) +
   scale_y_continuous(labels = scales::percent_format(),
                      expand = expansion(mult = c(0.05, 0.2))) +
   coord_flip() +
-  labs(x = NULL, y = "P(complete colony death)",
-       title = "Colony mortality risk by species") +
+  labs(x = NULL, y = "P(complete colony death)") +
   theme_coral() +
-  theme(axis.text.y = element_text(face = "italic", family = sp_font))
+  theme(axis.text.y = element_text(size = 7))
 
 # Plot M2: size_z → % area lost (partial + complete mortality combined)
 sev_grid <- data.frame(
@@ -798,23 +791,22 @@ pM2 <- ggplot() +
             aes(x = size_z, y = pred_pct),
             color = accent_col, linewidth = 1.1) +
   scale_color_manual(
+    name   = NULL,
     values = c("partial mortality" = accent_bg_col, "complete death" = "#3d2b1f"),
     labels = c("partial mortality" = "Partial mortality", "complete death" = "Complete death (100%)")
   ) +
   scale_y_continuous(labels = \(x) paste0(x, "%"), limits = c(0, 108)) +
-  labs(x = "Initial size z-score (within species)", y = "Area lost (%)",
-       color = NULL,
-       title = "Mortality severity by size",
-       subtitle = "Line = LMM (PAST)  |  Dashed = 100% death") +
+  labs(x = "Initial size z-score (within species)", y = "Partial mortality (%)") +
   theme_coral() +
-  theme(legend.position = "bottom",
-        legend.text = element_text(size = 7)) +
-  guides(color = guide_legend(nrow = 2))
+  theme(legend.position      = c(0.98, 0.5),
+        legend.justification = c("right", "center"),
+        legend.background    = element_rect(fill = alpha("white", 0.7), color = NA),
+        legend.text          = element_text(size = 7))
 
-p_mortality <- (pM1 | pM2)
-print(p_mortality)
-ggsave(file.path(plots_dir, "05_mortality_risk.jpeg"), p_mortality,
-       width = fig_w, height = 3.5, dpi = 300, units = "in")  # 2 side-by-side panels
+ggsave(file.path(plots_dir, "05a_mortality_risk_by_species.jpeg"), pM1,
+       width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
+ggsave(file.path(plots_dir, "05b_mortality_severity_by_size.jpeg"), pM2,
+       width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -824,29 +816,25 @@ ggsave(file.path(plots_dir, "05_mortality_risk.jpeg"), p_mortality,
 
 if (multi_site) {
 
-  # per-plot cover → per-site mean ± SE
-  cover_site <- data %>%
-    group_by(site, zone, plot_id, date) %>%
+  # per-plot cover for site comparison (individual plot observations as points)
+  cover_site_plots <- data %>%
+    group_by(site, zone, plot_id, date, time_days) %>%
     summarise(total_area = sum(area, na.rm = TRUE), .groups = "drop") %>%
-    mutate(pct_cover = total_area / PLOT_AREA_CM2 * 100) %>%
-    group_by(zone, date) %>%
-    summarise(mean_pct = mean(pct_cover), se_pct = sd(pct_cover) / sqrt(n()),
-              .groups = "drop")
+    mutate(pct_cover = total_area / PLOT_AREA_CM2 * 100)
 
-  pSC1 <- ggplot(cover_site, aes(x = date, y = mean_pct, color = zone, fill = zone)) +
-    geom_ribbon(aes(ymin = mean_pct - se_pct, ymax = mean_pct + se_pct),
-                alpha = 0.15, color = NA) +
-    geom_line(linewidth = 1.1) +
-    geom_point(size = 2.0) +
+  pSC1 <- ggplot(cover_site_plots, aes(x = date, y = pct_cover, color = zone, fill = zone)) +
+    geom_point(alpha = 0.55, size = 2.0) +
+    geom_smooth(method = "loess", formula = y ~ x, se = TRUE, alpha = 0.18,
+                linewidth = 1.0) +
     scale_color_manual(values = site_pal) +
     scale_fill_manual(values  = site_pal, guide = "none") +
     scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
     scale_y_continuous(labels = \(x) paste0(round(x, 1), "%")) +
-    labs(x = NULL, y = "Total cover (% of 25 m²)", color = NULL,
-         title = "Total coral cover over time",
-         subtitle = "Mean ± SE across plots") +
+    labs(x = "Survey date", y = "Total cover (% of 25 m²)", color = NULL) +
     theme_coral() +
-    theme(legend.position = "top")
+    theme(legend.position        = c(0.02, 0.98),
+          legend.justification   = c("left", "top"),
+          legend.background      = element_rect(fill = alpha("white", 0.7), color = NA))
 
   # species composition per site: proportion of colonies
   sp_site <- data %>%
@@ -858,15 +846,14 @@ if (multi_site) {
 
   pSC2 <- ggplot(sp_site, aes(x = zone, y = prop, fill = class)) +
     geom_col(width = 0.5, alpha = 0.88) +
-    scale_fill_manual(values = pal) +
+    scale_fill_manual(values = pal, labels = sp_codes) +
     scale_y_continuous(labels = scales::percent_format()) +
     coord_flip() +
-    labs(x = NULL, y = "Proportion of colonies", fill = NULL,
-         title = "Species composition by site") +
+    labs(x = NULL, y = "Proportion of colonies", fill = NULL) +
     theme_coral() +
-    theme(legend.text     = element_text(face = "italic", family = sp_font, size = 7),
+    theme(legend.text     = element_text(size = 7),
           legend.position = "bottom") +
-    guides(fill = guide_legend(ncol = 3))
+    guides(fill = guide_legend(nrow = 2))
 
   # initial size distribution per site
   init_size_site <- data %>%
@@ -879,15 +866,42 @@ if (multi_site) {
     geom_boxplot(width = 0.12, alpha = 0.85, outlier.shape = NA, linewidth = 0.5) +
     scale_color_manual(values = site_pal, guide = "none") +
     scale_fill_manual(values  = site_pal, guide = "none") +
-    labs(x = NULL, y = "log(colony area, cm²)",
-         title = "Initial colony size distribution") +
+    labs(x = NULL, y = "log(colony area, cm²)") +
     theme_coral()
 
-  p_site_cmp <- pSC2 / (pSC1 | pSC3) +
-    plot_layout(heights = c(0.7, 1.3))  # bar chart on top is content-light
-  print(p_site_cmp)
-  ggsave(file.path(plots_dir, "07_site_comparison.jpeg"), p_site_cmp,
-         width = fig_w, height = 4.5, dpi = 300, units = "in")  # 3-panel composite
+  # --- statistical tests for site comparison ---
+
+  # 7a: LMM testing whether sites differ in cover level and rate of change
+  # zone main effect = baseline cover difference; time_days:zone = diverging trajectories
+  model_cover_site <- lmer(
+    log(pct_cover) ~ time_days * zone + (1 | plot_id),
+    data = cover_site_plots
+  )
+  summary(model_cover_site)
+
+  # 7b: chi-square test of species composition independence across sites
+  sp_comp_mat <- sp_site %>%
+    tidyr::pivot_wider(id_cols = zone, names_from = class,
+                       values_from = n_colonies, values_fill = 0L) %>%
+    tibble::column_to_rownames("zone") %>%
+    as.matrix()
+  chisq_sp_comp <- chisq.test(sp_comp_mat)
+  message("Species composition chi-square: X2=", round(chisq_sp_comp$statistic, 2),
+          "  df=", chisq_sp_comp$parameter,
+          "  p=", round(chisq_sp_comp$p.value, 4))
+
+  # 7c: Wilcoxon rank-sum test comparing initial colony size between sites
+  # non-parametric: size distributions are right-skewed even after log-transform
+  wilcox_size_site <- wilcox.test(log(area) ~ zone, data = init_size_site)
+  message("Initial size Wilcoxon: W=", wilcox_size_site$statistic,
+          "  p=", round(wilcox_size_site$p.value, 4))
+
+  ggsave(file.path(plots_dir, "07a_site_cover_trajectory.jpeg"), pSC1,
+         width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
+  ggsave(file.path(plots_dir, "07b_site_species_composition.jpeg"), pSC2,
+         width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
+  ggsave(file.path(plots_dir, "07c_site_initial_size.jpeg"), pSC3,
+         width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
 
 } else {
   message("Single site — site comparison plot skipped")
@@ -939,9 +953,10 @@ size_plot_data <- size_means %>%
   left_join(species_n_total, by = "class") %>%
   mutate(
     class_label = paste0(
-      class,
-      ifelse(class %in% names(sig_mean_size), paste0("  ", sig_mean_size[class]), ""),
-      "  (n=", n_sp, ")"
+      sp_codes[class],
+      ifelse(class %in% names(sig_mean_size), paste0(" ", sig_mean_size[class]), ""),
+      "
+n = ", n_sp
     )
   ) %>%
   bind_rows(
@@ -961,9 +976,8 @@ size_plot_data$class_label <- factor(
   levels = c(sp_label_order, "All species")
 )
 
-# colors: species use pal; total row grey
-dot_colors <- c(pal[names(pal) %in% unique(size_means$class)],
-                "All species" = "grey45")
+# species use the canonical pal; "All species" aggregate row gets grey
+dot_colors <- c(pal, "All species" = "grey45")
 
 # separator y-position: just above the last species row
 sep_y <- length(sp_label_order) + 0.5
@@ -974,15 +988,13 @@ p3 <- ggplot(size_plot_data,
              color = accent_bg_col, linewidth = 0.5) +
   geom_point(alpha = 0.85) +
   geom_text(aes(label = n_colonies), size = 2.5, color = "black", fontface = "bold") +
-  geom_text(aes(label = ifelse(!is.na(mean_area), paste0(round(mean_area), " cm²"), "")),
-            vjust = 3.2, size = 2.2, color = "black") +
+  geom_text(aes(label = ifelse(!is.na(mean_area), paste0(round(mean_area), " cm² →"), "")),
+            hjust = 1.15, vjust = 0.5, size = 2.2, color = "grey30") +
   scale_size_area(max_size = 22, guide = "none") +
   scale_color_manual(values = dot_colors, guide = "none") +
-  labs(x = "Initial size class", y = NULL,
-       title = "Colony area by species and size class",
-       subtitle = "Circle labels: n colonies  |  Below: mean area") +
+  labs(x = "Initial size class", y = NULL) +
   theme_coral() +
-  theme(axis.text.y = element_text(face = "italic", family = sp_font, colour = "grey20"))
+  theme(axis.text.y = element_text(size = 7, colour = "grey20"))
 
 # Appendix plot A2: Tukey CLD for species mean size
 pA2 <- ggplot(cld_class_plot,
@@ -992,18 +1004,17 @@ pA2 <- ggplot(cld_class_plot,
   geom_text(aes(y = upper, label = .group),
             hjust = -0.4, size = 4.0, color = "grey30", fontface = "bold") +
   scale_color_manual(values = pal, guide = "none") +
+  scale_x_discrete(labels = sp_labels_n) +
   scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
   coord_flip() +
-  labs(x = NULL, y = "Estimated mean area (cm²)",
-       title = "Pairwise species size comparison (Tukey)",
-       subtitle = "Shared letter = not significantly different  |  Geometric mean ± 95% CI") +
+  labs(x = NULL, y = "Estimated mean area (cm²)") +
   theme_coral() +
-  theme(axis.text.y = element_text(face = "italic", family = sp_font))
+  theme(axis.text.y = element_text(size = 7))
 
-p_appendix <- p3 + pA2
-print(p_appendix)
-ggsave(file.path(plots_dir, "06_appendix_species_size.jpeg"), p_appendix,
-       width = fig_w, height = 4.0, dpi = 300, units = "in")  # bubble matrix needs y-room
+ggsave(file.path(plots_dir, "06a_species_size_bubble.jpeg"), p3,
+       width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
+ggsave(file.path(plots_dir, "06b_species_size_tukey.jpeg"), pA2,
+       width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1050,6 +1061,20 @@ extract_pairs <- function(pairs_obj, source, response) {
   )
 }
 
+# turnover t-test results (one row per species)
+turnover_ttest_results <- turnover_ttest %>%
+  transmute(
+    source    = "t-test: net turnover vs zero",
+    response  = "net annual change (% per year)",
+    type      = "one-sample t-test",
+    term      = as.character(class),
+    estimate  = round(turnover_sp$net_change[match(class, turnover_sp$class)], 4),
+    se        = round(turnover_sp$se_net[match(class,    turnover_sp$class)], 4),
+    statistic = NA_real_,
+    p_value   = round(t_p, 4),
+    sig       = t_sig
+  )
+
 # collect all results
 results_all <- bind_rows(
   extract_fixed(model_cover,         "LMM: total cover trend",    "log(% cover)"),
@@ -1058,7 +1083,8 @@ results_all <- bind_rows(
   extract_fixed(model_pm_severity,   "LMM: mortality severity",   "log(% area lost)"),
   extract_fixed(model_fate,          "GLMM: colony fate",         "P(colony died)"),
   extract_pairs(pairs_class,         "post-hoc: species size",    "log(area)"),
-  extract_pairs(pairs_fate_cl,       "post-hoc: colony fate",     "P(colony died)")
+  extract_pairs(pairs_fate_cl,       "post-hoc: colony fate",     "P(colony died)"),
+  turnover_ttest_results
 ) %>%
   mutate(sig = sig_stars(p_value)) %>%
   dplyr::arrange(source, p_value)
@@ -1069,6 +1095,37 @@ if (ran_crossed) {
     results_all,
     extract_fixed(model_crossed, "LMM: growth (species x size)", "log(area)") %>%
       mutate(sig = sig_stars(p_value))
+  )
+}
+
+# add site-comparison results if multi-site run was performed
+if (multi_site) {
+  results_all <- bind_rows(
+    results_all,
+    extract_fixed(model_cover_site, "LMM: site cover comparison", "log(% cover)") %>%
+      mutate(sig = sig_stars(p_value)),
+    data.frame(
+      source    = "chi-square: species composition by site",
+      response  = "colony counts",
+      type      = "chi-square test of independence",
+      term      = "all species × site",
+      estimate  = NA_real_,
+      se        = NA_real_,
+      statistic = round(as.numeric(chisq_sp_comp$statistic), 3),
+      p_value   = round(chisq_sp_comp$p.value, 4),
+      sig       = sig_stars(chisq_sp_comp$p.value)
+    ),
+    data.frame(
+      source    = "Wilcoxon: initial colony size by site",
+      response  = "log(colony area)",
+      type      = "Wilcoxon rank-sum test",
+      term      = "zone",
+      estimate  = NA_real_,
+      se        = NA_real_,
+      statistic = round(as.numeric(wilcox_size_site$statistic), 3),
+      p_value   = round(wilcox_size_site$p.value, 4),
+      sig       = sig_stars(wilcox_size_site$p.value)
+    )
   )
 }
 
