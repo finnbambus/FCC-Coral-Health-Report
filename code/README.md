@@ -12,75 +12,57 @@
 
 | Model | Type | Response | Fixed effects | Random effects |
 |-------|------|----------|---------------|----------------|
-| LMM: total cover (single-site) | `lmer` | `log(% cover)` | `time_days` | `(1\|plot_id)` |
-| LMM: colony growth | `lmer` | `log(area)` | `time_days × class + time_days × size_z` | `(1\|plot_id) + (1\|colony_id)` |
-| LMM: growth (species × size) | `lmer` | `log(area)` | `time_days × class × size_z` | same |
-| GLMM: mortality occurrence | `glmer` (binomial) | P(any mortality) | `size_z + class` | same |
-| LMM: mortality severity | `lmer` | `log(% area lost)` | `size_z + class` | same |
-| GLMM: colony fate | `glmer` (binomial) | P(colony died) | `size_z + class + site` | `(1\|plot_id)` |
-| LMM: site cover comparison | `lmer` | `log(% cover)` | `time_days × zone` | `(1\|plot_id)` |
+| GLMM: colony growth | `glmer` (Gamma) | `area` [log link] | `time_sc × class + time_sc × size_z + site` | `(1\|plot_id) + (1\|colony_id)` |
+| LMM: growth by size | `lmer` | `log(area)` | `time_days × size_z` | same |
+| LMM: mortality severity | `lmer` | `log(% area lost)` | `size_z + class` | `(1\|colony_id) + (1\|plot_id)` |
+| GLM: colony fate | `glm` (binomial) | P(colony died) | `size_z + class + site` | — |
+| GLMM: site cover | `glmer` (Gamma) | `pct_cover` [log link] | `time_sc × zone` | `(1\|plot_id)` |
+| GLMM: growth by site | `glmer` (Gamma) | `area` [log link] | `time_sc × zone` | `(1\|colony_id)` |
 | Chi-square: species composition | `chisq.test` | colony counts | by site × species | — |
 | Wilcoxon: initial size by site | `wilcox.test` | `log(area)` | by site | — |
-| t-test: net turnover vs zero | one-sample `t.test` | net change %/yr | per species | — |
 
+`time_sc` = `time_days / 100` — rescaled for numerical stability in Gamma GLMMs. Coefficients for `time_sc` describe change per 100 days; multiply by 3.65 for annual rate on log scale.
 `size_z` = within-species z-score of log(initial area). Reference level: **PAST** (species), `size_z = 0` (average initial size).
 Colonies with observation gaps (present → absent → present) were excluded prior to modelling.
+
+**Trajectory visualisation models** (02a, 02d, 03c, 03d) use separate `glm(Gamma)` fitted on per-plot arithmetic means — these match the plotted points and are not used for inference.
 
 ---
 
 ## Results
 
-### Total cover trend — LMM (single-site, pooled)
+### Colony growth — GLMM fixed effects (Gamma, log link)
+
+| Term | Estimate | SE | z | p | sig | note |
+|------|----------|----|---|---|-----|------|
+| (Intercept) | 3.589 | 0.036 | 99.34 | <0.001 | *** | PAST baseline |
+| time_sc | 0.0683 | 0.0062 | 10.95 | <0.001 | *** | ~+28%/100 days (~+25%/yr) |
+| size_z | 1.085 | 0.024 | 45.36 | <0.001 | *** | ~3× area per +1 SD |
+| time_sc:size_z | −0.0461 | 0.0055 | −8.41 | <0.001 | *** | growth convergence |
+| siteS2P2 | +0.094 | 0.039 | 2.42 | 0.016 | * | S2P2 colonies ~10% larger |
+| classColpophyllia natans | −0.754 | 0.176 | −4.28 | <0.001 | *** | ⚠ very low power |
+| classOrbicella faveolata | +1.099 | 0.170 | 6.48 | <0.001 | *** | ⚠ very low power |
+| classPorites porites | −1.023 | 0.114 | −8.97 | <0.001 | *** | ⚠ low power |
+| classPseudodiploria strigosa | −0.867 | 0.115 | −7.53 | <0.001 | *** | ⚠ low power |
+| classDiploria labyrinthiformis | +0.647 | 0.170 | 3.81 | <0.001 | *** | ⚠ very low power |
+| classSiderastrea siderea | −0.290 | 0.125 | −2.32 | 0.020 | * | ⚠ low power |
+| time_sc:classDiploria labyrinthiformis | −0.0952 | 0.0388 | −2.45 | 0.014 | * | ⚠ very low power |
+| time_sc:classSiderastrea siderea | +0.0701 | 0.0292 | 2.40 | 0.016 | * | ⚠ low power |
+
+> **Read:** PAST colonies grow ~25%/yr (time_sc β = 0.068 → ×3.65 → 0.249 log-units/yr → exp(0.249)−1 ≈ +28%). Colony size is the dominant predictor: each +1 SD in initial size ≈ ×3 colony area. Larger initial colonies grow proportionally slower (ontogenetic convergence). DLAB shows faster baseline growth but decelerates more strongly over time. SSID uniquely accelerates. S2P2 colonies start ~10% larger on average.
+
+---
+
+### Growth by size (LMM) — used for size-effect visualisation
 
 | Term | Estimate | SE | t | p | sig |
 |------|----------|----|---|---|-----|
-| time_days | 0.0002 | — | 1.620 | 0.120 | ns |
+| (Intercept) | 3.537 | 0.058 | 60.89 | <0.001 | *** |
+| time_days | 0.0006 | 0.0001 | 10.49 | <0.001 | *** |
+| size_z | 1.096 | 0.035 | 31.58 | <0.001 | *** |
+| time_days:size_z | −0.0005 | 0.0001 | −9.09 | <0.001 | *** |
 
-> **Read:** No significant trend in total coral cover when pooling across both sites. The site-level comparison (below) reveals a significant positive trend when site is modelled explicitly.
-
----
-
-### Colony growth — LMM fixed effects
-
-| Term | Estimate | SE | t | p | sig | note |
-|------|----------|----|---|---|-----|------|
-| (Intercept) | 3.592 | 0.061 | — | <0.001 | *** | PAST baseline |
-| time_days | 0.0006 | 0.0001 | 8.954 | <0.001 | *** | ~+21%/yr |
-| classColpophyllia natans | −0.825 | 0.195 | — | <0.001 | *** | ⚠ low power |
-| classOrbicella faveolata | +1.089 | 0.186 | — | <0.001 | *** | ⚠ low power |
-| classPorites porites | −1.100 | 0.125 | — | <0.001 | *** | ⚠ low power |
-| classPseudodiploria strigosa | −0.872 | 0.125 | — | <0.001 | *** | ⚠ low power |
-| classDiploria labyrinthiformis | +0.703 | 0.183 | — | <0.001 | *** | ⚠ low power |
-| classSiderastrea siderea | −0.346 | 0.136 | — | 0.011 | * | ⚠ low power |
-| size_z | 1.091 | 0.027 | 40.803 | <0.001 | *** | ~3× area per +1 SD |
-| time_days:size_z | −0.0005 | 0.0001 | −8.758 | <0.001 | *** | growth convergence |
-| time_days:classSiderastrea siderea | +0.0009 | 0.0003 | 2.963 | 0.003 | ** | ⚠ low power |
-
-> **Read:** PAST colonies grow ~21%/yr. Colony size is the dominant predictor: each +1 SD in initial size ≈ ×3 colony area (`size_z` β = 1.09). Larger initial colonies grow proportionally slower (`time_days:size_z` negative — ontogenetic growth slowdown, trajectories converge). SSID uniquely shows faster relative growth over time (positive `time_days:SSID` interaction). OFAV and DLAB start significantly larger than PAST; PPOR and PSTR start smaller.
-
----
-
-### Colony growth — crossed model (species × size_z)
-
-Extends the base model with `time_days × class × size_z` to test whether the size-growth relationship varies by species.
-
-| Term | Estimate | SE | t | p | sig | note |
-|------|----------|----|---|---|-----|------|
-| time_days | 0.0006 | 0.0001 | — | <0.001 | *** | |
-| size_z | ~1.07 | — | — | <0.001 | *** | |
-| time_days:size_z | ~−0.0003–0.0005 | — | — | <0.001 | *** | |
-
-> **Read:** Species × size interactions confirm that the size-growth gradient is not uniform. SSID shows pronounced size stratification; CNAT and SINT show weaker size scaling than PAST. Full coefficients mirror the base model main effects.
-
----
-
-### Mortality occurrence — GLMM fixed effects
-
-| Term | Estimate | SE | z | p | sig |
-|------|----------|----|---|---|-----|
-| (Intercept) | −0.717 | 0.113 | — | <0.001 | *** |
-
-> **Read:** No species or size effect reached significance for mortality *occurrence*. All species experience similar rates of any partial mortality event at mean initial size.
+> **Read:** Consistent with the Gamma GLMM. Used to draw the size-effect prediction line in 02b only.
 
 ---
 
@@ -88,86 +70,50 @@ Extends the base model with `time_days × class × size_z` to test whether the s
 
 | Term | Estimate | SE | t | p | sig |
 |------|----------|----|---|---|-----|
-| (Intercept) | 3.061 | 0.202 | — | <0.001 | *** |
-| size_z | −0.223 | 0.060 | — | <0.001 | *** |
-| classPorites porites | +0.560 | 0.282 | — | 0.046 | * | ⚠ low power |
+| (Intercept) | 3.061 | 0.202 | 15.13 | <0.001 | *** |
+| size_z | −0.223 | 0.060 | −3.69 | <0.001 | *** |
+| classPorites porites | +0.560 | 0.282 | 1.99 | 0.047 | * | ⚠ low power |
 
-> **Read:** Larger initial colonies lose significantly less proportional tissue when mortality occurs (β = −0.22 per +1 SD; back-transformed ~20% less area lost). PPOR shows significantly higher severity than PAST.
+> **Read:** Larger initial colonies lose significantly less proportional tissue when mortality occurs (~20% less per +1 SD). PPOR shows significantly higher severity than PAST. No other species differ significantly.
 
 ---
 
-### Colony fate — GLMM fixed effects
+### Colony fate — GLM fixed effects (binomial)
 
 | Term | Estimate | SE | z | p | sig | note |
 |------|----------|----|---|---|-----|------|
-| (Intercept) | −1.108 | 0.235 | — | <0.001 | *** | PAST, S1P1 baseline |
-| size_z | −1.007 | 0.201 | −5.017 | <0.001 | *** | OR = 0.37/SD |
-| siteS2P2 | −1.517 | 0.360 | −4.209 | <0.001 | *** | OR = 0.22 |
-| classPorites porites | +2.008 | 0.621 | +3.235 | 0.001 | ** | ⚠ low power |
-| classColpophyllia natans | +2.128 | 1.038 | +2.049 | 0.040 | * | ⚠ low power |
+| (Intercept) | −1.108 | 0.235 | −4.71 | <0.001 | *** | PAST, S1P1 baseline |
+| size_z | −1.007 | 0.201 | −5.02 | <0.001 | *** | OR = 0.37/SD |
+| siteS2P2 | −1.517 | 0.360 | −4.21 | <0.001 | *** | OR = 0.22 |
+| classPorites porites | +2.008 | 0.621 | +3.24 | 0.001 | ** | ⚠ low power |
+| classColpophyllia natans | +2.128 | 1.038 | +2.05 | 0.040 | * | ⚠ very low power |
 
-> **Read:** Larger initial size strongly predicts survival — each +1 SD reduces odds of death by 63% (OR = 0.37). Colonies at S2P2 Farallon have 78% lower mortality odds than S1P1 Juanillo (OR = 0.22), indicating a strong site effect on colony survival. PPOR and CNAT have significantly higher complete mortality probability than PAST.
-
----
-
-### Post-hoc pairwise — species fate (Tukey)
-
-| Contrast | z | p | sig |
-|----------|---|---|-----|
-| Porites astreoides / Porites porites | −2.049 | 0.448 | ns |
-
-> No significant pairwise fate contrasts after Tukey adjustment. Site effect dominates.
+> **Read:** Larger initial size strongly predicts survival — each +1 SD reduces odds of death by 63% (OR = 0.37). Colonies at S2P2 Farallon have 78% lower mortality odds than S1P1 Juanillo (OR = 0.22). PPOR and CNAT have significantly higher complete mortality probability than PAST.
 
 ---
 
-### Post-hoc pairwise — species mean size (Tukey, selected significant)
+### Site cover — GLMM (Gamma, log link)
 
-| Contrast | Estimate | SE | t | p | sig |
-|----------|----------|----|---|---|-----|
-| PAST − OFAV | −1.035 | 0.135 | — | <0.001 | *** |
-| PAST − PPOR | +1.211 | 0.103 | — | <0.001 | *** |
-| PAST − PSTR | +0.907 | 0.090 | — | <0.001 | *** |
-| CNAT − DLAB | −1.266 | 0.201 | — | <0.001 | *** |
-| CNAT − OFAV | −1.782 | 0.203 | — | <0.001 | *** |
-| DLAB − PPOR | +1.730 | 0.161 | — | <0.001 | *** |
-| DLAB − PSTR | +1.426 | 0.154 | — | <0.001 | *** |
-| OFAV − PPOR | +2.246 | 0.168 | — | <0.001 | *** |
-| OFAV − PSTR | +1.941 | 0.160 | — | <0.001 | *** |
-| OFAV − SSID | +1.109 | 0.166 | — | <0.001 | *** |
-| OFAV − SINT | +1.054 | 0.158 | — | <0.001 | *** |
-| PPOR − SSID | −1.137 | 0.142 | — | <0.001 | *** |
-| PPOR − SINT | −1.192 | 0.133 | — | <0.001 | *** |
-| PSTR − SSID | −0.833 | 0.132 | — | <0.001 | *** |
-| PSTR − SINT | −0.888 | 0.122 | — | <0.001 | *** |
-
-> **Read:** OFAV is the largest species (significantly larger than all others). PPOR and PSTR are the smallest. CNAT, SSID, SINT, DLAB, and PAST occupy an intermediate cluster with multiple non-significant contrasts between them.
-
----
-
-### Net turnover — one-sample t-tests (net change ≠ 0)
-
-| Species | p | sig |
-|---------|---|-----|
-| PAST | 0.0001 | *** |
-| SINT | 0.0001 | *** |
-| PSTR | 0.027 | * |
-| CNAT | 0.039 | * |
-| PPOR | ns | |
-| SSID | ns | |
-| OFAV | ns | |
-| DLAB | ns | |
-
-> **Read:** PAST, SINT, PSTR, and CNAT show net tissue change significantly different from zero over the monitoring period. PPOR, SSID, OFAV, and DLAB do not — their gained and lost tissue are roughly in balance.
-
----
-
-### Site cover comparison — LMM
-
-| Term | Estimate | SE | t | p | sig |
+| Term | Estimate | SE | z | p | sig |
 |------|----------|----|---|---|-----|
-| time_days | 0.0004 | — | 2.450 | 0.024 | * |
+| (Intercept) | 3.657 | 0.108 | 33.92 | <0.001 | *** |
+| time_sc | 0.0644 | 0.0063 | 10.21 | <0.001 | *** |
+| zoneJuanillo | −0.449 | 0.152 | −2.96 | 0.003 | ** |
+| time_sc:zoneJuanillo | +0.037 | 0.014 | 2.64 | 0.008 | ** |
 
-> **Read:** When the two sites are modelled separately (zone as fixed effect), total coral cover shows a significant positive trend over time (β = +0.0004 log-units/day, ~+15%/yr). The non-significant single-site pooled result above reflects greater residual variance when site structure is ignored.
+> **Read:** Significant positive cover trend at both sites (p < 0.001). Juanillo starts with lower cover (~−45% vs Farallon baseline) but shows a significantly steeper rate of increase (interaction p = 0.008), converging toward Farallon over time.
+
+---
+
+### Growth by site — GLMM (Gamma, log link)
+
+| Term | Estimate | SE | z | p | sig |
+|------|----------|----|---|---|-----|
+| (Intercept) | 3.656 | 0.107 | 34.12 | <0.001 | *** |
+| time_sc | 0.0371 | 0.014 | 2.64 | 0.008 | ** |
+| zoneJuanillo | −0.449 | 0.152 | −2.96 | 0.003 | ** |
+
+> **Read:** S2P2 Farallon colonies are significantly larger at baseline. Growth rate is positive at Farallon; the zone × time interaction is not significant, indicating similar growth trajectories at both sites after accounting for baseline differences.
 
 ---
 
@@ -179,7 +125,7 @@ Extends the base model with `time_days × class × size_z` to test whether the s
 | df | 7 |
 | p | < 0.001 *** |
 
-> **Read:** Species composition differs significantly between sites (p < 0.001). Interpret with caution: chi-square approximation warning due to small cell counts for rare species (OFAV, DLAB, CNAT).
+> **Read:** Species composition differs significantly between sites. Interpret with caution due to small cell counts for rare species.
 
 ---
 
@@ -190,19 +136,20 @@ Extends the base model with `time_days × class × size_z` to test whether the s
 | W | 13051.5 |
 | p | 0.035 * |
 
-> **Read:** Colonies at the two sites have significantly different initial size distributions (W = 13051.5, p = 0.035). One site hosts larger colonies on average at the start of monitoring.
+> **Read:** Colonies at the two sites have significantly different initial size distributions. S2P2 Farallon hosts larger colonies on average at the start of monitoring.
 
 ---
 
 ## Summary narrative
 
-- **Site S2P2 Farallon outperforms S1P1 Juanillo in colony survival:** colonies at Farallon have 78% lower odds of complete mortality (OR = 0.22), the strongest effect in the fate model.
-- **Total cover is increasing when site structure is accounted for:** the site-level LMM shows a significant positive trend (+15%/yr, p = 0.024), though the pooled single-site model is non-significant (p = 0.120).
-- **Colony size is the dominant cross-model predictor:** larger initial size → larger area (×3 per SD), slower relative growth (ontogenetic convergence), lower partial mortality severity (~20% less tissue lost per event), and lower complete mortality odds (OR = 0.37 per SD).
-- **SSID uniquely accelerates over time:** positive `time_days:SSID` interaction (β = +0.0009, p = 0.003) — SSID colonies gain a relative growth advantage as the monitoring period extends.
-- **OFAV is the largest species** by a wide margin; PPOR and PSTR are the smallest.
-- **PPOR and CNAT carry the highest mortality risk** (both p ≤ 0.040 above PAST in fate model).
-- **Species composition and initial size differ between sites** (χ² p < 0.001; Wilcoxon p = 0.035), confirming that the two zones host structurally distinct communities.
+- **S2P2 Farallon outperforms S1P1 Juanillo in colony survival:** 78% lower odds of complete mortality (OR = 0.22), the strongest effect in the fate model.
+- **Total cover is increasing at both sites:** Farallon starts higher; Juanillo shows a steeper rate of increase (interaction p = 0.008), suggesting recovery.
+- **Colony size is the dominant cross-model predictor:** larger initial size → larger area (×3 per SD), slower relative growth, lower partial mortality severity (~20% less tissue lost per event), and lower complete mortality odds (OR = 0.37 per SD).
+- **SSID uniquely accelerates over time:** positive `time_sc:SSID` interaction (z = 2.40, p = 0.016).
+- **DLAB grows fastest at baseline but decelerates:** negative `time_sc:DLAB` interaction (z = −2.45, p = 0.014).
+- **OFAV and DLAB start significantly larger than PAST; PPOR and PSTR start smaller.**
+- **PPOR and CNAT carry the highest mortality risk** (both p ≤ 0.040 vs PAST in fate model).
+- **Species composition and initial size differ between sites** (χ² p < 0.001; Wilcoxon p = 0.035).
 - **Power caveat:** species with n < 26 flagged ⚠. Effect sizes are ecologically substantial and consistent across models; wider replication needed for confirmatory inference.
 
 ---
@@ -213,7 +160,7 @@ Extends the base model with `time_days × class × size_z` to test whether the s
 |----------|------------|
 | `area` | Colony planar area (cm²) |
 | `size_z` | Z-score of log(initial area) within species — 0 = species mean size, +1 = 1 SD above mean |
-| `size_class` | Descriptive label only (small/medium/large, log-range thirds per species) — not used in models |
+| `time_sc` | `time_days / 100` — used in Gamma GLMMs for numerical stability |
 | `partial_mortality` | % area lost relative to previous survey (only when area decreased); complete death coded as 100% |
 | `colony_fate` | `"died"` if colony absent before plot's last survey date |
 | `time_days` | Days since first survey |

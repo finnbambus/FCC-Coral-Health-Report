@@ -1,6 +1,6 @@
 # load packages
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
-pacman::p_load(lme4, lmerTest, dplyr, tidyr, ggplot2, viridisLite, patchwork, scales, pwr, here, DHARMa)
+pacman::p_load(lme4, lmerTest, dplyr, tidyr, ggplot2, viridisLite, patchwork, scales, pwr, here)
 
 plots_dir <- here::here("plots")
 dir.create(plots_dir, showWarnings = FALSE)
@@ -131,8 +131,6 @@ initial_size <- data %>%
   dplyr::select(colony_id, size_z)
 
 data <- left_join(data, initial_size, by = "colony_id")
-time_scale <- 100  # used to rescale time_days for numerical stability in glmer
-data       <- data %>% mutate(time_sc = time_days / time_scale)
 
 # --- species sample size check ---
 target_power <- 0.80; target_alpha <- 0.05; target_d <- 0.8; n_hard_min <- 5
@@ -235,40 +233,9 @@ cover_sp_mean <- cover_sp %>%
   group_by(date, class) %>%
   summarise(mean_pct = mean(pct_cover_sp), .groups = "drop")
 
-# smooth each species with smooth.spline on absolute cover %, predict on weekly grid
-dates_grid <- seq(min(cover_sp_mean$date), max(cover_sp_mean$date), by = "week")
-
-cover_sp_smooth <- cover_sp_mean %>%
-  group_by(class) %>%
-  group_modify(~ {
-    x        <- as.numeric(.x$date)
-    y        <- .x$mean_pct
-    xout     <- as.numeric(dates_grid)
-    n_unique <- length(unique(x))
-    pred <- if (n_unique >= 4) {
-      fit <- smooth.spline(x, y, df = 5)
-      pmax(predict(fit, xout)$y, 0)
-    } else if (n_unique >= 2) {
-      pmax(predict(lm(y ~ x), newdata = data.frame(x = xout)), 0)
-    } else {
-      rep(y[1], length(xout))
-    }
-    data.frame(date = dates_grid, mean_pct = pred)
-  }) %>%
-  ungroup()
-
-# order species by overall mean cover ascending — smallest at bottom of stack
-sp_cover_order <- cover_sp_mean %>%
-  group_by(class) %>%
-  summarise(overall_mean = mean(mean_pct), .groups = "drop") %>%
-  arrange(desc(overall_mean)) %>%
-  pull(class)
-
-cover_sp_smooth$class <- factor(cover_sp_smooth$class, levels = sp_cover_order)
-
-# 01a: smoothed stacked area — stack height = total cover, relative area = composition
-p01a <- ggplot(cover_sp_smooth, aes(x = date, y = mean_pct, fill = class)) +
-  geom_area(position = "stack", alpha = 0.88) +
+# 01a: stacked species cover over time
+p01a <- ggplot(cover_sp_mean, aes(x = date, y = mean_pct, fill = class)) +
+  geom_area(alpha = 0.85, position = "stack") +
   scale_fill_manual(values = pal, labels = sp_codes) +
   scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
   scale_y_continuous(labels = \(x) paste0(x, "%"),
@@ -278,36 +245,22 @@ p01a <- ggplot(cover_sp_smooth, aes(x = date, y = mean_pct, fill = class)) +
   theme(legend.position = "top") +
   guides(fill = guide_legend(nrow = 1))
 
-date_origin <- min(data$date)
+ggsave(file.path(plots_dir, "01a_species_cover.jpeg"), p01a,
+       width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
 
-# 01b: colony abundance per species over time — LMM trend per species
-# per-plot counts as the modelling unit (plot_id as random intercept)
-abundance_sp_plot <- data %>%
-  group_by(date, time_days, plot_id, class) %>%
-  summarise(n_colonies = n_distinct(colony_id), .groups = "drop")
-
-model_abundance <- lmer(
-  n_colonies ~ time_days * class + (1 | plot_id),
-  data = abundance_sp_plot
-)
-
-# LMM predictions on a dense date grid per species
-abund_grid <- expand.grid(
-  class     = levels(data$class),
-  time_days = seq(min(data$time_days), max(data$time_days), length.out = 60)
-) %>%
-  mutate(
-    date       = date_origin + time_days,
-    pred_abund = predict(model_abundance, newdata = ., re.form = NA)
+# 01b: colony abundance per species over time — mean colonies per 25 m² plot
+abundance_sp <- data %>%
+  group_by(date, class) %>%
+  summarise(
+    n_colonies    = n_distinct(colony_id),
+    n_plots       = n_distinct(plot_id),
+    mean_per_plot = n_colonies / n_plots,
+    .groups       = "drop"
   )
 
-p01b <- ggplot() +
-  geom_point(data = abundance_sp_plot,
-             aes(x = date, y = n_colonies, color = class),
-             alpha = 0.25, size = 1.4) +
-  geom_line(data = abund_grid,
-            aes(x = date, y = pred_abund, color = class),
-            linewidth = 0.8) +
+p01b <- ggplot(abundance_sp, aes(x = date, y = mean_per_plot, color = class)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8, alpha = 0.8) +
   scale_color_manual(values = pal, labels = sp_codes) +
   scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
   labs(x = "Survey date", y = "Mean colonies per plot (25 m²)", color = NULL) +
@@ -315,37 +268,21 @@ p01b <- ggplot() +
   theme(legend.position = "top") +
   guides(color = guide_legend(nrow = 1))
 
-p01_combined <- guide_area() /
-  ((p01a + theme(legend.position = "none")) |
-   (p01b + guides(color = guide_legend(nrow = 1)))) +
-  plot_layout(guides = "collect", heights = c(0.12, 1))
-ggsave(file.path(plots_dir, "01_species_overview.jpeg"), p01_combined,
-       width = fig_ls_w, height = fig_sq_h, dpi = 300, units = "px")
+ggsave(file.path(plots_dir, "01b_species_abundance.jpeg"), p01b,
+       width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 2 — SPECIES GROWTH TRAJECTORIES AND SIZE EFFECTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-# full model with size_z — used for coefficient tables and size-effect plots
-model_growth <- glmer(
-  area ~ time_sc * class + time_sc * size_z + site +
+# model for species trajectory predictions (includes species to allow per-species lines)
+model_growth <- lmer(
+  log(area) ~ time_days * class + time_days * size_z + site +
     (1 | plot_id) + (1 | colony_id),
-  data = data, family = Gamma(link = "log"),
-  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+  data = data
 )
 summary(model_growth)
-
-# per-plot means for trajectory visualisation (averaging unit = plot × species × date)
-obs_summary_traj <- data %>%
-  group_by(class, zone, plot_id, date, time_days, time_sc) %>%
-  summarise(mean_area = mean(area), .groups = "drop")
-
-# GLM on per-plot means — predictions match the arithmetic mean shown in the plot
-model_growth_traj <- glm(
-  mean_area ~ time_sc * class,
-  data = obs_summary_traj, family = Gamma(link = "log")
-)
 
 # simplified size-only model — used for growth-by-size prediction line
 model_growth_size <- lmer(
@@ -354,52 +291,34 @@ model_growth_size <- lmer(
 )
 summary(model_growth_size)
 
-# --- GLMM assumption checks via DHARMa simulation-based residuals ---
-set.seed(42)
-sim_res <- simulateResiduals(model_growth, n = 500, plot = FALSE)
-
-# panel a: simulated residuals vs fitted (should be uniform, flat)
-dharma_df <- data.frame(
-  fitted   = fitted(model_growth),
-  sim_resid = sim_res$scaledResiduals
+# --- LMM assumption checks ---
+resid_df <- data.frame(
+  fitted         = fitted(model_growth),
+  residuals      = resid(model_growth),
+  sqrt_abs_resid = sqrt(abs(resid(model_growth)))
 )
 
-pa <- ggplot(dharma_df, aes(x = fitted, y = sim_resid)) +
-  geom_point(alpha = 0.15, size = 0.7, color = "grey40") +
-  geom_hline(yintercept = c(0.25, 0.5, 0.75), linetype = "dashed",
-             color = "grey70", linewidth = 0.4) +
-  geom_smooth(method = "loess", se = FALSE, color = accent_col, linewidth = 0.8) +
-  scale_y_continuous(limits = c(0, 1)) +
-  labs(x = "Fitted values (cm²)", y = "Simulated residual quantile",
-       title = "Residuals vs Fitted (DHARMa)") +
-  theme_coral()
-
-# panel b: QQ of simulated residuals (should follow diagonal)
-sim_q   <- sort(sim_res$scaledResiduals)
-unif_q  <- qunif(ppoints(length(sim_q)))
-pb <- ggplot(data.frame(x = unif_q, y = sim_q), aes(x = x, y = y)) +
-  geom_abline(slope = 1, intercept = 0, color = accent_col, linewidth = 0.7) +
+pa <- ggplot(resid_df, aes(x = fitted, y = residuals)) +
   geom_point(alpha = 0.20, size = 0.7, color = "grey40") +
-  labs(x = "Expected (uniform)", y = "Observed quantile",
-       title = "Uniform Q-Q — simulated residuals") +
-  theme_coral()
-
-# panel c: Pearson residuals vs fitted (correct scale for Gamma)
-pearson_df <- data.frame(
-  fitted        = fitted(model_growth),
-  pearson_resid = residuals(model_growth, type = "pearson")
-)
-
-pc <- ggplot(pearson_df, aes(x = fitted, y = pearson_resid)) +
-  geom_point(alpha = 0.15, size = 0.7, color = "grey40") +
   geom_hline(yintercept = 0, linetype = "dashed", color = accent_col, linewidth = 0.5) +
   geom_smooth(method = "loess", se = FALSE, color = accent_col, linewidth = 0.8) +
-  labs(x = "Fitted values (cm²)", y = "Pearson residual",
-       title = "Pearson Residuals vs Fitted") +
+  labs(x = "Fitted values", y = "Residuals", title = "Residuals vs Fitted") +
   theme_coral()
 
-# panel d: random effects QQ (still normally distributed by assumption)
-re_vals <- ranef(model_growth)$colony_id[[1]]
+pb <- ggplot(resid_df, aes(sample = residuals)) +
+  stat_qq(alpha = 0.25, size = 0.7, color = "grey40") +
+  stat_qq_line(color = accent_col, linewidth = 0.7) +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles",
+       title = "Normal Q-Q — residuals") +
+  theme_coral()
+
+pc <- ggplot(resid_df, aes(x = fitted, y = sqrt_abs_resid)) +
+  geom_point(alpha = 0.20, size = 0.7, color = "grey40") +
+  geom_smooth(method = "loess", se = FALSE, color = accent_col, linewidth = 0.8) +
+  labs(x = "Fitted values", y = "√|Residuals|", title = "Scale-Location") +
+  theme_coral()
+
+re_vals <- ranef(model_growth)$colony_id[, 1]
 pd <- ggplot(data.frame(re = re_vals), aes(sample = re)) +
   stat_qq(alpha = 0.3, size = 0.7, color = "grey40") +
   stat_qq_line(color = accent_col, linewidth = 0.7) +
@@ -407,34 +326,28 @@ pd <- ggplot(data.frame(re = re_vals), aes(sample = re)) +
        title = "Q-Q: random effects (colony)") +
   theme_coral()
 
-p_assumptions <- (pa | pb) / (pc | pd) +
-  plot_annotation(
-    title   = "Assumption checks — Gamma GLMM: colony growth (model_growth)",
-    subtitle = "Visualisation GLMs (trajectory plots) are not used for inference and are not checked here.",
-    theme   = theme(
-      plot.title    = element_text(family = "Helvetica", size = 9, face = "bold", color = "grey20"),
-      plot.subtitle = element_text(family = "Helvetica", size = 7, color = "grey50")
-    )
-  )
+p_assumptions <- (pa | pb) / (pc | pd)
+ggsave(file.path(plots_dir, "00_lmm_assumption_checks.jpeg"), p_assumptions,
+       width = fig_ls_w, height = fig_ls_w, dpi = 300, units = "px")
 
 # 02a: per-species colony area trajectories — observed mean±SE + model prediction
-ref_site <- levels(factor(data$site))[1]
+date_origin <- min(data$date)
+ref_site    <- levels(factor(data$site))[1]
 
 traj_grid <- expand.grid(
   class     = levels(data$class),
-  time_days = seq(min(data$time_days), max(data$time_days), length.out = 60)
+  time_days = seq(min(data$time_days), max(data$time_days), length.out = 60),
+  size_z    = 0,
+  site      = ref_site
 ) %>%
-  mutate(time_sc = time_days / time_scale, date = date_origin + time_days) %>%
-  mutate(pred_area = predict(model_growth_traj, newdata = ., type = "response"))
-
-# per-plot mean ± SE per species per date, colored by site
-obs_summary <- data %>%
-  group_by(class, zone, plot_id, date) %>%
-  summarise(
-    mean_area = mean(area),
-    se_area   = sd(area) / sqrt(n()),
-    .groups   = "drop"
+  mutate(
+    date      = date_origin + time_days,
+    pred_area = exp(predict(model_growth, newdata = ., re.form = NA))
   )
+
+obs_summary <- data %>%
+  group_by(class, date) %>%
+  summarise(mean_area = mean(area), se_area = sd(area) / sqrt(n()), .groups = "drop")
 
 p02a <- ggplot() +
   geom_line(data = traj_grid,
@@ -442,9 +355,9 @@ p02a <- ggplot() +
   geom_pointrange(data = obs_summary,
                   aes(x = date, y = mean_area,
                       ymin = mean_area - se_area, ymax = mean_area + se_area,
-                      color = zone),
-                  size = 0.2, linewidth = 0.4, alpha = 0.35) +
-  scale_color_manual(values = c(pal, site_pal), guide = "none") +
+                      color = class),
+                  size = 0.3, alpha = 0.7) +
+  scale_color_manual(values = pal, guide = "none") +
   scale_x_date(date_breaks = "1 year", date_labels = "'%y") +
   facet_wrap(~ class, scales = "free_y", nrow = 2,
              labeller = as_labeller(sp_labels_n)) +
@@ -452,73 +365,7 @@ p02a <- ggplot() +
   theme_coral() +
   theme(strip.text = element_text(family = "Helvetica", face = "plain", size = 7))
 
-ggsave(file.path(plots_dir, "02_growth_trajectories.jpeg"), p02a,
-       width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
-
-# partial mortality data — used by 02d, 02c, and 03d
-dead_terminal <- data %>%
-  filter(colony_fate == "died", !is.na(size_z)) %>%
-  group_by(colony_id) %>%
-  slice_max(date, n = 1, with_ties = FALSE) %>%
-  ungroup() %>%
-  mutate(partial_mortality = 100, event_type = "complete death")
-
-pm_data <- data %>%
-  filter(!is.na(size_z)) %>%
-  mutate(event_type = ifelse(!is.na(partial_mortality), "partial mortality", "none")) %>%
-  bind_rows(dead_terminal)
-
-pm_events  <- pm_data %>% filter(!is.na(partial_mortality), partial_mortality > 0)
-pm_partial <- pm_events %>% filter(event_type != "complete death")
-
-# 02d: partial mortality trajectories over time per species
-model_pm_time <- glmer(
-  partial_mortality ~ time_sc + class + (1 | plot_id),
-  data = pm_events, family = Gamma(link = "log"),
-  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
-)
-
-pm_obs_summary <- pm_partial %>%
-  group_by(class, zone, plot_id, date, time_days, time_sc) %>%
-  summarise(
-    mean_pm = mean(partial_mortality),
-    se_pm   = sd(partial_mortality) / sqrt(n()),
-    .groups = "drop"
-  )
-
-# GLM on per-plot means so predictions match the arithmetic mean shown in points
-model_pm_traj <- glm(
-  mean_pm ~ time_sc + class,
-  data = pm_obs_summary, family = Gamma(link = "log")
-)
-
-pm_traj_grid <- expand.grid(
-  class     = levels(data$class),
-  time_days = seq(min(pm_partial$time_days, na.rm = TRUE),
-                  max(pm_partial$time_days, na.rm = TRUE), length.out = 60)
-) %>%
-  mutate(time_sc = time_days / time_scale, date = date_origin + time_days) %>%
-  mutate(pred_pm = predict(model_pm_traj, newdata = ., type = "response"))
-
-p02d <- ggplot() +
-  geom_line(data = pm_traj_grid,
-            aes(x = date, y = pred_pm, color = class), linewidth = 1.0) +
-  geom_pointrange(data = pm_obs_summary,
-                  aes(x = date, y = mean_pm,
-                      ymin = mean_pm - se_pm, ymax = mean_pm + se_pm,
-                      color = zone),
-                  size = 0.2, linewidth = 0.4, alpha = 0.35) +
-  scale_color_manual(values = c(pal, site_pal), guide = "none") +
-  scale_x_date(date_breaks = "1 year", date_labels = "'%y") +
-  scale_y_continuous(labels = \(x) paste0(x, "%"),
-                     expand = expansion(mult = c(0.02, 0.05))) +
-  coord_cartesian(ylim = c(0, NA)) +
-  facet_wrap(~ class, nrow = 2, labeller = as_labeller(sp_labels_n)) +
-  labs(x = "Survey date", y = "Partial mortality (%)") +
-  theme_coral() +
-  theme(strip.text = element_text(family = "Helvetica", face = "plain", size = 7))
-
-ggsave(file.path(plots_dir, "03_mortality_trajectories.jpeg"), p02d,
+ggsave(file.path(plots_dir, "02a_growth_trajectories.jpeg"), p02a,
        width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
 
 # 02b: growth rate by initial size — empirical points + model prediction line
@@ -559,10 +406,24 @@ p02b <- ggplot() +
         legend.background    = element_rect(fill = alpha("white", 0.7), color = NA),
         legend.text          = element_text(size = 7))
 
-ggsave(file.path(plots_dir, "04_growth_by_size.jpeg"), p02b,
+ggsave(file.path(plots_dir, "02b_growth_by_size.jpeg"), p02b,
        width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
 
 # 02c: mortality severity by initial size
+dead_terminal <- data %>%
+  filter(colony_fate == "died", !is.na(size_z)) %>%
+  group_by(colony_id) %>%
+  slice_max(date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(partial_mortality = 100, event_type = "complete death")
+
+pm_data <- data %>%
+  filter(!is.na(size_z)) %>%
+  mutate(event_type = ifelse(!is.na(partial_mortality), "partial mortality", "none")) %>%
+  bind_rows(dead_terminal)
+
+pm_events <- pm_data %>% filter(!is.na(partial_mortality), partial_mortality > 0)
+
 model_pm_severity <- lmer(
   log(partial_mortality) ~ size_z + class + (1 | colony_id) + (1 | plot_id),
   data = pm_events
@@ -596,9 +457,8 @@ p02c <- ggplot() +
         legend.background    = element_rect(fill = alpha("white", 0.7), color = NA),
         legend.text          = element_text(size = 7))
 
-ggsave(file.path(plots_dir, "05_mortality_by_size.jpeg"), p02c,
+ggsave(file.path(plots_dir, "02c_mortality_by_size.jpeg"), p02c,
        width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
-
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -608,44 +468,25 @@ ggsave(file.path(plots_dir, "05_mortality_by_size.jpeg"), p02c,
 
 if (multi_site) {
 
-  zones_sorted  <- sort(unique(data$zone))
-  time_scale <- 100  # divide time_days by this for numerical stability in glmer
-  data       <- data %>% mutate(time_sc = time_days / time_scale)
-  pm_events  <- pm_events  %>% mutate(time_sc = time_days / time_scale)
-  pm_partial <- pm_partial %>% mutate(time_sc = time_days / time_scale)
-
   # per-plot cover for site-level LMM
   cover_site_plots <- data %>%
     group_by(site, zone, plot_id, date, time_days) %>%
     summarise(total_area = sum(area, na.rm = TRUE), .groups = "drop") %>%
-    mutate(pct_cover = total_area / PLOT_AREA_CM2 * 100,
-           time_sc   = time_days / time_scale)
+    mutate(pct_cover = total_area / PLOT_AREA_CM2 * 100)
 
-  # Gamma GLMM: site cover trend over time
-  model_cover_site <- glmer(
-    pct_cover ~ time_sc * zone + (1 | plot_id),
-    data = cover_site_plots, family = Gamma(link = "log"),
-    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+  # LMM: site cover trend over time
+  model_cover_site <- lmer(
+    log(pct_cover) ~ time_days * zone + (1 | plot_id),
+    data = cover_site_plots
   )
   summary(model_cover_site)
 
-  # Gamma GLMM predictions for 03a on a dense date grid per zone
-  cover_site_grid <- expand.grid(
-    zone      = zones_sorted,
-    time_days = seq(min(cover_site_plots$time_days), max(cover_site_plots$time_days), length.out = 60)
-  ) %>%
-    mutate(time_sc = time_days / time_scale, date = min(data$date) + time_days) %>%
-    mutate(pred_cover = predict(model_cover_site, newdata = ., re.form = NA, type = "response"))
-
-  # 03a: site cover — per-plot points (background) + LMM trend lines
-  p03a <- ggplot() +
-    geom_point(data = cover_site_plots,
-               aes(x = date, y = pct_cover, color = zone),
-               alpha = 0.25, size = 1.4) +
-    geom_line(data = cover_site_grid,
-              aes(x = date, y = pred_cover, color = zone),
-              linewidth = 1.0) +
+  # 03a: site cover trajectories
+  p03a <- ggplot(cover_site_plots, aes(x = date, y = pct_cover, color = zone, fill = zone)) +
+    geom_point(alpha = 0.55, size = 2.0) +
+    geom_smooth(method = "lm", formula = y ~ x, se = TRUE, alpha = 0.18, linewidth = 1.0) +
     scale_color_manual(values = site_pal) +
+    scale_fill_manual(values  = site_pal, guide = "none") +
     scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
     scale_y_continuous(labels = \(x) paste0(round(x, 1), "%")) +
     labs(x = "Survey date", y = "Total cover (% of 25 m²)", color = NULL) +
@@ -654,72 +495,71 @@ if (multi_site) {
           legend.justification = c("left", "top"),
           legend.background    = element_rect(fill = alpha("white", 0.7), color = NA))
 
+  ggsave(file.path(plots_dir, "03a_site_cover.jpeg"), p03a,
+         width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
 
-  # 03b: colony abundance per site — per-plot counts (background) + LMM trend lines
-  abundance_site_plot <- data %>%
-    group_by(date, time_days, plot_id, zone) %>%
-    summarise(n_colonies = n_distinct(colony_id), .groups = "drop")
-
-  model_abundance_site <- lmer(
-    n_colonies ~ time_days * zone + (1 | plot_id),
-    data = abundance_site_plot
-  )
-
-  abund_site_grid <- expand.grid(
-    zone      = zones_sorted,
-    time_days = seq(min(abundance_site_plot$time_days), max(abundance_site_plot$time_days), length.out = 60)
-  ) %>%
-    mutate(
-      date        = min(data$date) + time_days,
-      pred_abund  = predict(model_abundance_site, newdata = ., re.form = NA)
+  # 03b: colony abundance per site over time — mean colonies per 25 m² plot
+  abundance_site <- data %>%
+    group_by(date, zone) %>%
+    summarise(
+      n_colonies    = n_distinct(colony_id),
+      n_plots       = n_distinct(plot_id),
+      mean_per_plot = n_colonies / n_plots,
+      .groups       = "drop"
     )
 
-  p03b <- ggplot() +
-    geom_point(data = abundance_site_plot,
-               aes(x = date, y = n_colonies, color = zone),
-               alpha = 0.25, size = 1.4) +
-    geom_line(data = abund_site_grid,
-              aes(x = date, y = pred_abund, color = zone),
-              linewidth = 1.0) +
+  p03b <- ggplot(abundance_site, aes(x = date, y = mean_per_plot, color = zone, fill = zone)) +
+    geom_point(alpha = 0.65, size = 2.0) +
+    geom_smooth(method = "loess", formula = y ~ x, se = TRUE, alpha = 0.18, linewidth = 1.0) +
     scale_color_manual(values = site_pal) +
+    scale_fill_manual(values  = site_pal, guide = "none") +
     scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
-    labs(x = "Survey date", y = "Colonies per plot (25 m²)", color = NULL) +
+    labs(x = "Survey date", y = "Mean colonies per plot (25 m²)", color = NULL) +
     theme_coral() +
     theme(legend.position      = c(0.02, 0.98),
           legend.justification = c("left", "top"),
           legend.background    = element_rect(fill = alpha("white", 0.7), color = NA))
 
+  ggsave(file.path(plots_dir, "03b_site_abundance.jpeg"), p03b,
+         width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
+
   # LMM: growth by site — site shifts intercept and overall growth rate (time_days:zone)
   # size_z interaction still assumed equal across sites
-  model_growth_site <- glmer(
-    area ~ time_sc * zone + (1 | colony_id),
-    data = data, family = Gamma(link = "log"),
-    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+  model_growth_site <- lmer(
+    log(area) ~ time_days * size_z + time_days * zone + (1 | plot_id) + (1 | colony_id),
+    data = data
   )
   summary(model_growth_site)
 
+  # derive model prediction lines per site
+  coefs_gs     <- fixef(model_growth_site)
+  zones_sorted <- sort(unique(data$zone))
 
-  # 03c: colony area trajectories over time by site — per-plot mean + model prediction
+  growth_pred_site <- bind_rows(lapply(zones_sorted, function(z) {
+    key        <- paste0("time_days:zone", z)
+    zone_extra <- if (key %in% names(coefs_gs)) coefs_gs[key] else 0
+    data.frame(
+      zone   = z,
+      size_z = seq(sz_range[1], sz_range[2], length.out = 60)
+    ) %>%
+      mutate(pred_pct = (exp((coefs_gs["time_days"] + zone_extra +
+                                coefs_gs["time_days:size_z"] * size_z) * 365) - 1) * 100)
+  }))
+
+  # 03c: colony area trajectories over time by site — observed mean±SE + model prediction
   obs_site <- data %>%
-    group_by(zone, plot_id, date, time_days, time_sc) %>%
-    summarise(
-      mean_area = mean(area),
-      se_area   = sd(area) / sqrt(n()),
-      .groups   = "drop"
-    )
-
-  # GLM on per-plot means so predictions match the arithmetic mean shown in points
-  model_growth_site_traj <- glm(
-    mean_area ~ time_sc * zone,
-    data = obs_site, family = Gamma(link = "log")
-  )
+    group_by(zone, date) %>%
+    summarise(mean_area = mean(area), se_area = sd(area) / sqrt(n()), .groups = "drop")
 
   traj_site_grid <- expand.grid(
     zone      = zones_sorted,
-    time_days = seq(min(data$time_days), max(data$time_days), length.out = 60)
+    time_days = seq(min(data$time_days), max(data$time_days), length.out = 60),
+    size_z    = 0
   ) %>%
-    mutate(time_sc = time_days / time_scale, date = date_origin + time_days) %>%
-    mutate(pred_area = predict(model_growth_site_traj, newdata = ., type = "response"))
+    mutate(
+      date      = date_origin + time_days,
+      pred_area = exp(predict(model_growth_site, newdata = ., re.form = NA))
+    )
 
   p03c <- ggplot() +
     geom_line(data = traj_site_grid,
@@ -728,104 +568,52 @@ if (multi_site) {
                     aes(x = date, y = mean_area,
                         ymin = mean_area - se_area, ymax = mean_area + se_area,
                         color = zone),
-                    size = 0.2, linewidth = 0.4, alpha = 0.35) +
-    scale_color_manual(values = site_pal, guide = "none") +
+                    size = 0.3, alpha = 0.7) +
+    scale_color_manual(values = site_pal, name = NULL) +
     scale_x_date(date_breaks = "1 year", date_labels = "'%y") +
-    facet_wrap(~ zone, nrow = 1) +
     labs(x = "Survey date", y = "Mean colony area (cm²)") +
     theme_coral() +
-    theme(strip.text = element_text(face = "plain", family = "Helvetica",
-                                    size = 9, color = "grey20"))
+    theme(legend.position      = c(0.02, 0.98),
+          legend.justification = c("left", "top"),
+          legend.background    = element_rect(fill = alpha("white", 0.7), color = NA))
 
-  p04_site <- (p03a | p03b) +
-    plot_layout(guides = "collect") &
-    theme(legend.position = "bottom")
-  ggsave(file.path(plots_dir, "06_site_cover_abundance.jpeg"), p04_site,
+  ggsave(file.path(plots_dir, "03c_growth_by_site.jpeg"), p03c,
          width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
 
-  p03c_single <- ggplot() +
-    geom_line(data = traj_site_grid,
-              aes(x = date, y = pred_area, color = zone), linewidth = 1.0) +
-    geom_pointrange(data = obs_site,
-                    aes(x = date, y = mean_area,
-                        ymin = mean_area - se_area, ymax = mean_area + se_area,
-                        color = zone),
-                    size = 0.2, linewidth = 0.4, alpha = 0.35) +
-    scale_color_manual(values = site_pal, labels = zones_sorted) +
-    scale_x_date(date_breaks = "1 year", date_labels = "'%y") +
-    labs(x = "Survey date", y = "Mean colony area (cm²)", color = NULL) +
-    theme_coral()
-
-  # 03d: partial mortality % over time by site
-  model_mortality_site <- glmer(
-    partial_mortality ~ time_sc * zone + (1 | colony_id) + (1 | plot_id),
-    data = pm_events, family = Gamma(link = "log"),
-    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
-  )
-  summary(model_mortality_site)
-
-  # per-plot mean ± SE of partial mortality per date (complete deaths excluded)
-  mort_obs_site <- pm_partial %>%
-    group_by(zone, plot_id, date, time_days, time_sc) %>%
+  # 03d: mortality rate over time by site
+  # proportion of colonies experiencing any mortality event per survey interval
+  mortality_site_time <- data %>%
+    arrange(colony_id, date) %>%
+    group_by(colony_id, zone) %>%
+    mutate(had_mortality = as.integer(!is.na(partial_mortality))) %>%
+    ungroup() %>%
+    group_by(zone, date) %>%
     summarise(
-      mean_pm = mean(partial_mortality),
-      se_pm   = sd(partial_mortality) / sqrt(n()),
-      .groups = "drop"
+      prop_mortality = mean(had_mortality, na.rm = TRUE),
+      n              = n(),
+      se             = sqrt(prop_mortality * (1 - prop_mortality) / n),
+      .groups        = "drop"
     )
 
-  # GLM on per-plot means so predictions match the arithmetic mean shown in points
-  model_mortality_site_traj <- glm(
-    mean_pm ~ time_sc * zone,
-    data = mort_obs_site, family = Gamma(link = "log")
-  )
-
-  mort_site_grid <- expand.grid(
-    zone      = zones_sorted,
-    time_days = seq(min(pm_partial$time_days, na.rm = TRUE),
-                    max(pm_partial$time_days, na.rm = TRUE), length.out = 60)
-  ) %>%
-    mutate(time_sc = time_days / time_scale, date = min(data$date) + time_days) %>%
-    mutate(pred_pct = predict(model_mortality_site_traj, newdata = ., type = "response"))
-
-  p03d <- ggplot() +
-    geom_line(data = mort_site_grid,
-              aes(x = date, y = pred_pct, color = zone), linewidth = 1.0) +
-    geom_pointrange(data = mort_obs_site,
-                    aes(x = date, y = mean_pm,
-                        ymin = mean_pm - se_pm, ymax = mean_pm + se_pm,
-                        color = zone),
-                    size = 0.2, linewidth = 0.4, alpha = 0.35) +
-    scale_color_manual(values = site_pal, guide = "none") +
-    scale_x_date(date_breaks = "1 year", date_labels = "'%y") +
-    scale_y_continuous(labels = \(x) paste0(x, "%"),
-                       expand = expansion(mult = c(0.02, 0.05))) +
-    coord_cartesian(ylim = c(0, NA)) +
-    facet_wrap(~ zone, nrow = 1) +
-    labs(x = "Survey date", y = "Partial mortality (%)") +
+  p03d <- ggplot(mortality_site_time,
+                 aes(x = date, y = prop_mortality, color = zone, fill = zone)) +
+    geom_ribbon(aes(ymin = pmax(prop_mortality - se, 0),
+                    ymax = pmin(prop_mortality + se, 1)),
+                alpha = 0.18, color = NA) +
+    geom_line(linewidth = 1.0) +
+    geom_point(size = 2.0, alpha = 0.8) +
+    scale_color_manual(values = site_pal) +
+    scale_fill_manual(values  = site_pal, guide = "none") +
+    scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
+    scale_y_continuous(labels = scales::percent_format(), limits = c(0, NA),
+                       expand = expansion(mult = c(0, 0.05))) +
+    labs(x = "Survey date", y = "Proportion of colonies with mortality", color = NULL) +
     theme_coral() +
-    theme(strip.text = element_text(face = "plain", family = "Helvetica",
-                                    size = 9, color = "grey20"))
+    theme(legend.position      = c(0.02, 0.98),
+          legend.justification = c("left", "top"),
+          legend.background    = element_rect(fill = alpha("white", 0.7), color = NA))
 
-  p03d_single <- ggplot() +
-    geom_line(data = mort_site_grid,
-              aes(x = date, y = pred_pct, color = zone), linewidth = 1.0) +
-    geom_pointrange(data = mort_obs_site,
-                    aes(x = date, y = mean_pm,
-                        ymin = mean_pm - se_pm, ymax = mean_pm + se_pm,
-                        color = zone),
-                    size = 0.2, linewidth = 0.4, alpha = 0.35) +
-    scale_color_manual(values = site_pal, labels = zones_sorted) +
-    scale_x_date(date_breaks = "1 year", date_labels = "'%y") +
-    scale_y_continuous(labels = \(x) paste0(x, "%"),
-                       expand = expansion(mult = c(0.02, 0.05))) +
-    coord_cartesian(ylim = c(0, NA)) +
-    labs(x = "Survey date", y = "Partial mortality (%)", color = NULL) +
-    theme_coral()
-
-  p07_site_traj <- (p03c_single | p03d_single) +
-    plot_layout(guides = "collect") &
-    theme(legend.position = "bottom")
-  ggsave(file.path(plots_dir, "07_site_trajectories.jpeg"), p07_site_traj,
+  ggsave(file.path(plots_dir, "03d_mortality_by_site.jpeg"), p03d,
          width = fig_ls_w, height = fig_ls_h, dpi = 300, units = "px")
 
   # 03e: species composition by site — proportion of colonies per species
@@ -847,7 +635,7 @@ if (multi_site) {
           legend.position = "bottom") +
     guides(fill = guide_legend(nrow = 2))
 
-  ggsave(file.path(plots_dir, "08_species_by_site.jpeg"), p03e,
+  ggsave(file.path(plots_dir, "03e_species_by_site.jpeg"), p03e,
          width = fig_sq_w, height = fig_sq_h, dpi = 300, units = "px")
 
   # chi-square: species composition independence by site
@@ -909,16 +697,16 @@ extract_fixed <- function(model, source, response) {
 }
 
 results_all <- bind_rows(
-  extract_fixed(model_growth,      "GLMM: colony growth (Gamma)",      "area [log link]"),
-  extract_fixed(model_growth_size, "LMM: growth by size",              "log(area)"),
-  extract_fixed(model_pm_severity, "LMM: mortality severity",          "log(% area lost)")
+  extract_fixed(model_growth,      "LMM: colony growth",        "log(area)"),
+  extract_fixed(model_growth_size, "LMM: growth (size only)",   "log(area)"),
+  extract_fixed(model_pm_severity, "LMM: mortality severity",   "log(% area lost)")
 )
 
 if (multi_site) {
   results_all <- bind_rows(
     results_all,
-    extract_fixed(model_cover_site,  "GLMM: site cover (Gamma)",         "pct_cover [log link]"),
-    extract_fixed(model_growth_site, "GLMM: growth by site (Gamma)",     "area [log link]"),
+    extract_fixed(model_cover_site,  "LMM: site cover",  "log(% cover)"),
+    extract_fixed(model_growth_site, "LMM: growth by site", "log(area)"),
     extract_fixed(model_fate,        "GLMM: colony fate",   "P(colony died)"),
     data.frame(
       source    = "chi-square: species composition by site",

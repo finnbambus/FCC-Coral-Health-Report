@@ -1,6 +1,6 @@
 # Analysis Session — Thought Process Timeline
 
-**Project:** FCC Coral Health Report · **Site:** Farallon (S2P2)
+**Project:** FCC Coral Health Report · **Sites:** S1P1 Juanillo · S2P2 Farallon
 
 ---
 
@@ -28,55 +28,57 @@ A colony that disappears for one survey and reappears later has an ambiguous ide
 
 ---
 
-## 5 — Response variable: area vs log(area)
+## 5 — Response variable and model family choice
 
-Initial models used raw area as the response. Assumption checks showed a strong funnel pattern in residuals-vs-fitted and heavy-tailed QQ residuals — classic signs of right-skewed, heteroscedastic data. Switching to `log(area)` resolved both issues and is ecologically appropriate (growth is multiplicative).
+**Initial approach:** `lmer(log(area) ~ ...)` — log-transforming before fitting. This is statistically sound in terms of normality but creates a systematic visualisation problem: `predict()` on the log scale gives the geometric mean (median), not the arithmetic mean. Back-transforming with `exp()` systematically underestimates observed arithmetic means, especially when random effect variances are large.
+
+**The Jensen's inequality problem:** For a log-normal distribution, `E[Y] = exp(μ + σ²/2)`, not `exp(μ)`. We attempted to apply the correction `exp(predict + 0.5 × σ²_residual)` (Jensen's inequality), then expanded it to `exp(predict + 0.5 × (σ²_residual + σ²_colony + σ²_plot))` to include random effect variances — but this still underestimated by ~80% because `size_z` (coefficient ≈ 1.09) adds another massive variance term: `exp(β_sz² / 2) ≈ 1.8`.
+
+**Final solution — two-level model separation:**
+1. **Inference models:** Switched from `lmer(log(y))` to `glmer(y, family = Gamma(link="log"))`. Gamma GLMM with log link is the correct model for positive continuous data — it models the arithmetic mean directly on the log scale without the Jensen's inequality issue in the residuals.
+2. **Visualisation models:** Separate `glm(Gamma)` fit on per-plot arithmetic means. Since the plotted points ARE per-plot arithmetic means, a GLM on those means produces trend lines that pass through the data by construction, regardless of size_z distribution or random effect variance.
+
+This cleanly separates inferential models (individual colonies, full mixed structure, for p-values and coefficients) from visualisation models (per-plot means, for accurate trend lines in plots).
 
 ---
 
-## 6 — Size predictor: from categories to a continuous z-score
+## 6 — Numerical stability: rescaling time
+
+Gamma GLMMs with `time_days` (range 0–700+) interacting with binary zone predictors (0/1) produced convergence failures — the optimizer reported "Rescale variables? large eigenvalue ratio." Solution: `time_sc = time_days / 100`, used in all Gamma GLMMs. Coefficients scale accordingly (multiply by 3.65 for log-unit annual rate). The lmer models for size effects retain `time_days` since they converge without issues.
+
+---
+
+## 7 — Size predictor: from categories to a continuous z-score
 
 **First approach:** split each species' initial log-area range into thirds and label colonies small/medium/large. This worked mechanically but throws away information by discretising a continuous variable.
 
-**Revised approach:** `size_z` = z-score of log(initial area), computed within each species. This preserves the full continuous gradient, avoids arbitrary bin boundaries, and keeps the interpretation species-relative (a +1 on size_z means 1 SD above the species mean, regardless of species). `size_class` labels are retained for descriptive plots only.
+**Revised approach:** `size_z` = z-score of log(initial area), computed within each species. This preserves the full continuous gradient, avoids arbitrary bin boundaries, and keeps the interpretation species-relative (+1 on size_z = 1 SD above species mean).
 
-The ecological rationale: coral growth is fundamentally continuous — a single coefficient for the size_z slope is more powerful and more interpretable than two category contrasts.
-
-*Edge case:* species with a single colony (or all-equal areas) are assigned `size_z = 0` (species mean).
+*Edge case:* species with a single colony (or all-equal areas) are assigned `size_z = 0`.
 
 ---
 
-## 7 — Model building strategy
+## 8 — Model building strategy
 
-Built the base LMM with `time_days × class + time_days × size_z`. The interaction terms allow each species and size class to have its own growth slope. Ran assumption checks first, confirmed log-transform made them pass, then interpreted results.
-
-Because `size_z` was significant, the crossed model (`time_days × class × size_z`) was also run conditionally. It revealed that SSID has the most extreme size stratification (interaction +1.72), and that PAST and PSTR also have significantly steeper size gradients than CNAT.
-
----
-
-## 8 — Post-hoc all-vs-all species comparisons
-
-The dummy-coded model only compares each species to CNAT (the reference). To understand *all* pairwise species differences we added `emmeans` + `multcomp::cld()` (Compact Letter Display). This also handles the Tukey multiple-comparisons correction automatically. With `size_z` continuous, no post-hoc is needed for size — the slope coefficient captures the full effect.
-
-**Finding that prompted the next step:** significant size_z effects raised the question of whether smaller colonies are also more likely to *lose tissue* or *die*.
+Built the growth GLMM with `time_sc × class + time_sc × size_z + site`. Interactions allow each species and colony size to have its own growth slope. A separate size-only LMM (`log(area) ~ time_days × size_z`) is used purely for the size-effect visualisation (02b) where the `time_days` coefficient scale is more interpretable.
 
 ---
 
 ## 9 — Partial mortality
 
-We filled the `partial_mortality` column from the data itself: if a colony's area decreased between surveys, partial mortality = % area lost. If area increased or was the first observation, partial mortality = NA.
+We filled `partial_mortality` from the data itself: if a colony's area decreased between surveys, partial mortality = % area lost. If area increased or was the first observation, partial mortality = NA.
 
-This created two new response variables:
-- **Occurrence** (binary: did partial mortality happen at all?) — GLMM, binomial
+Two response variables:
 - **Severity** (how much area was lost, given it occurred?) — LMM on log(% area lost)
+- **Trajectory over time** — Gamma GLM on per-plot means for visualisation
 
 ---
 
-## 10 — Complete colony mortality
+## 10 — Complete colony mortality and trajectory filtering
 
-Partial mortality doesn't capture colonies that disappear entirely. We detected complete mortality by comparing each colony's last survey date against its plot's last survey date — if the colony dropped out early, it died. Added these as terminal rows with 100% mortality for the severity model.
+Partial mortality doesn't capture colonies that disappear entirely. We detected complete mortality by comparing each colony's last survey date against its plot's last survey date — if the colony dropped out early, it died. Terminal rows with 100% mortality are added for the severity model.
 
-This produced a third response variable: **colony fate** (binary: died vs alive) — GLMM, binomial.
+**Trajectory plots (02d, 03d):** Complete mortality events (100%) were initially included in the temporal trajectory plots. However, they cluster at the start of the time series (early colony loss) and severely skew the trajectory line upward early on, misrepresenting the ongoing partial tissue-loss dynamic. These events are excluded from `pm_partial` which feeds only the trajectory plots and their visualisation models. The full `pm_events` (including complete deaths) is retained for the severity model and fate model.
 
 ---
 
@@ -89,21 +91,17 @@ With multiple species and limited field data, some species have very few colonie
 | Hard floor | n < 5 colonies | Species removed — model parameters cannot be estimated |
 | Power flag | n < 26 colonies (d=0.8, power=0.80, two-sample t-test lower bound) | Species kept, results flagged ⚠ in output |
 
-The two-sample t-test power analysis is a *conservative* lower bound — LMMs with repeated measures gain power from having multiple observations per colony, so the actual required n is lower. Using it as a flag rather than a strict filter allows the analysis to proceed while keeping readers informed about which results have limited replication.
+After applying the hard floor, the final species set was: **PAST, SINT, PPOR, PSTR, SSID, OFAV, DLAB, CNAT**.
 
-After applying the hard floor, the final species set was: **CNAT, PAST, PSTR, SSID, SINT**.
-
-**Reference species switch (CNAT → PAST):** PAST was chosen as the model reference level because it has the highest colony count (lowest SE on all contrasts) and is ecologically the most common species at this site. Using PAST as reference makes the intercept more stable and gives more interpretable contrasts — other species are compared against the most abundant and resilient species rather than the most mortality-prone one (CNAT).
+**Reference species:** PAST chosen as model reference level — highest colony count, lowest SE, ecologically most abundant and resilient.
 
 ---
 
 ## 12 — Results summary dataframe
 
-All significant results are collected into `results_sig` via two helper functions:
-- `extract_fixed()`: pulls fixed-effect coefficients, SE, t/z statistics and p-values from any lmer/glmer model
-- `extract_pairs()`: pulls Tukey pairwise contrasts from emmeans objects
-
-A `power_note` column flags any term whose name contains a low-power species.
+All significant results collected into `results_sig` via:
+- `extract_fixed()`: pulls fixed-effect coefficients, SE, z/t statistics and p-values from any lmer/glmer model (column detection handles both t values and z values automatically)
+- A `power_note` column flags terms involving low-power species
 
 ---
 
@@ -111,20 +109,24 @@ A `power_note` column flags any term whose name contains a low-power species.
 
 | Decision | Chosen approach | Alternative considered |
 |----------|----------------|------------------------|
-| Response variable | `log(area)` | Raw area — failed assumption checks |
+| Inference model family | `glmer(Gamma, log link)` | `lmer(log(y))` — back-transformation bias |
+| Visualisation trend lines | `glm(Gamma)` on per-plot means | GLMM predictions with variance corrections — still biased due to size_z |
 | Size predictor | Continuous `size_z` (within-species z-score of log area) | Categorical thirds — discards information |
-| Size model structure | General size_z effect first; crossed (species × size_z) if significant | Species-nested — premature complexity |
-| Species comparison | emmeans + Tukey CLD for all pairwise | Dummy-coded contrasts vs reference only |
-| Complete mortality | Disappearance before plot's last date | Relying on `partial_mortality` column only |
+| Time scaling | `time_sc = time_days / 100` for GLMMs | Raw `time_days` — causes eigenvalue instability |
+| Complete deaths in trajectories | Excluded from 02d/03d (pm_partial) | Included — skews early trajectory by clustering at t=0 |
+| Complete mortality detection | Disappearance before plot's last date | Relying on `partial_mortality` column only |
 | Observation gaps | Remove colonies with absent-then-present pattern | Keep and impute — identity unreliable |
 | Underpowered species | Keep with ⚠ flag (hard floor = 5 colonies) | Remove entirely — loses too many species |
-| Random effects | `(1\|plot_id) + (1\|colony_id)` | `(1\|colony_id)` only — misses plot-level clustering |
+| Trajectory model structure | Additive `time_sc + class` (02d) | `time_sc * class` — degenerate Hessian with sparse mortality data |
 
 ---
 
-## Current findings (Farallon S2P2, post power-filter species)
+## Current findings (both sites)
 
-- **Size is the dominant driver** across all outcomes: larger initial size → larger colonies, slower relative growth, lower partial mortality severity, lower complete mortality risk.
-- **SSID is the most size-variable species** in relative terms (size_z interaction +1.72 in crossed model).
-- **PAST is the most resilient** — significantly lower mortality probability than CNAT despite similar size.
-- **All post-hoc contrasts and several species effects are low-power** — the patterns are ecologically consistent and effect sizes are substantial, but wider replication is needed for confirmatory inference.
+- **S2P2 Farallon outperforms S1P1 Juanillo in colony survival:** 78% lower odds of complete mortality (OR = 0.22).
+- **Cover is increasing at both sites:** Juanillo shows a steeper rate of increase, converging toward Farallon (zone × time p = 0.008).
+- **Colony size is the dominant cross-model predictor:** larger initial size → larger area (×3 per SD), slower relative growth (ontogenetic convergence), lower mortality severity, lower mortality probability.
+- **SSID uniquely accelerates over time** (time_sc:SSID z = 2.40, p = 0.016).
+- **DLAB grows fastest at baseline but decelerates** (time_sc:DLAB z = −2.45, p = 0.014).
+- **PPOR and CNAT carry the highest mortality risk** vs PAST (both p ≤ 0.040).
+- **Species composition and initial size differ between sites** (χ² p < 0.001; Wilcoxon p = 0.035).
