@@ -1,17 +1,15 @@
 # load packages
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
-pacman::p_load(lme4, lmerTest, dplyr, tidyr, ggplot2, wesanderson, patchwork, emmeans, multcomp, multcompView, scales, pwr)
+pacman::p_load(lme4, lmerTest, dplyr, tidyr, ggplot2, viridisLite, patchwork, emmeans, multcomp, multcompView, scales, pwr, here)
 
-# set wd to project folder
-this_file <- rstudioapi::getSourceEditorContext()$path
-setwd(dirname(this_file))
-setwd("..")
-
-plots_dir <- "plots"
+plots_dir <- here::here("plots")
 dir.create(plots_dir, showWarnings = FALSE)
 
-# read data
-data <- read.csv("./data/combined_data.csv", sep = ";")
+# read and combine both site data files
+data <- dplyr::bind_rows(
+  read.csv(here::here("data", "S1P1_combined_data.csv"), sep = ";"),
+  read.csv(here::here("data", "S2P2_combined_data.csv"), sep = ";")
+)
 
 # unique IDs: genet_id and plot numbers are site-local, so prefix with site
 data$plot_id   <- paste(data$site, gsub("Plot ", "", data$plot), sep = "_")
@@ -127,13 +125,17 @@ data <- data %>%
 # size_class — categorical: log-range thirds within species (used for descriptive plots only)
 #              single-colony / zero-variance species assigned z=0 and class="medium"
 initial_size <- data %>%
-  group_by(colony_id, class) %>%
+  group_by(colony_id) %>%
   slice_min(date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
   group_by(class) %>%
   mutate(
     log_area   = log(area),
-    size_z     = if (n() < 2 || sd(log_area) == 0) 0
-                 else (log_area - mean(log_area)) / sd(log_area),
+    size_z     = {
+                   s <- sd(log_area)
+                   if (n() < 2 || s == 0) rep(0, n())
+                   else (log_area - mean(log_area)) / s
+                 },
     size_class = if (n_distinct(area) == 1) {
       factor(rep("medium", n()), levels = c("small", "medium", "large"))
     } else {
@@ -166,9 +168,10 @@ species_n <- data %>%
   distinct(colony_id, class) %>%
   count(class, name = "n_colonies") %>%
   mutate(
-    n_power_min  = n_power_min,
+    n_power_min    = n_power_min,
     adequate_power = n_colonies >= n_power_min,
-    low_power      = n_colonies >= n_hard_min & !adequate_power,
+    low_power      = n_colonies >= 10 & n_colonies < n_power_min,
+    very_low_power = n_colonies >= n_hard_min & n_colonies < 10,
     too_few        = n_colonies < n_hard_min
   )
 
@@ -177,21 +180,26 @@ message("Species n check  |  hard floor: ", n_hard_min,
 print(as.data.frame(species_n))
 
 # apply only the hard floor; power-flagged species stay in but are marked in results
-excluded_spp  <- species_n %>% filter(too_few) %>% pull(class)
-low_power_spp <- species_n %>% filter(low_power) %>% pull(class)
+excluded_spp       <- species_n %>% filter(too_few)        %>% pull(class)
+very_low_power_spp <- species_n %>% filter(very_low_power) %>% pull(class)
+low_power_spp      <- species_n %>% filter(low_power)      %>% pull(class)
 
 if (length(excluded_spp) > 0) {
   message("Removing (below hard floor n=", n_hard_min, "): ",
           paste(excluded_spp, collapse = ", "))
   data <- data %>% filter(!class %in% excluded_spp)
 }
+if (length(very_low_power_spp) > 0) {
+  message("Very low power n=5-9 (flagged in results, not removed): ",
+          paste(very_low_power_spp, collapse = ", "))
+}
 if (length(low_power_spp) > 0) {
-  message("Low-power species (flagged in results, not removed): ",
+  message("Low power n=10-", n_power_min - 1, " (flagged in results, not removed): ",
           paste(low_power_spp, collapse = ", "))
 }
 
 # reference species: PAST has most colonies → lowest SE on all pairwise comparisons
-data$class <- relevel(factor(data$class), ref = "Porites astreoides")
+data$class <- relevel(droplevels(factor(data$class)), ref = "Porites astreoides")
 
 # plot area constant for % cover conversion (5 × 5 m photoquadrats)
 PLOT_AREA_CM2 <- 250000   # 25 m² = 250 000 cm²
@@ -200,11 +208,55 @@ PLOT_AREA_CM2 <- 250000   # 25 m² = 250 000 cm²
 multi_site <- length(unique(data$site)) > 1
 site_term  <- if (multi_site) "+ site" else ""
 
-# color palette: one color per species, interpolated from Moonrise3
-n_species <- length(unique(data$class))
-pal <- wesanderson::wes_palette("Moonrise3", n_species, type = "continuous")
-names(pal) <- sort(unique(data$class))
+# significance star helper — used in plots and results summary
+sig_stars <- function(p) {
+  dplyr::case_when(
+    p < 0.001 ~ "***",
+    p < 0.01  ~ "**",
+    p < 0.05  ~ "*",
+    p < 0.1   ~ ".",
+    TRUE      ~ ""
+  )
+}
 
+# ── design system ──────────────────────────────────────────────────────────
+accent_col    <- "#898C31"   # project accent  rgb(137, 140, 49)
+accent_bg_col <- "#E5E6D2"   # accent lightened 78% (used for grid lines)
+sp_font       <- "Times"     # Times New Roman for species names (italic)
+
+theme_coral <- function(base_size = 9) {
+  theme_minimal(base_size = base_size, base_family = "Helvetica") %+replace%
+    theme(
+      plot.title       = element_text(face = "bold", size = base_size + 1, hjust = 0,
+                                      color = "grey10", margin = margin(b = 3)),
+      plot.subtitle    = element_text(size = base_size - 1, hjust = 0, color = "grey45",
+                                      margin = margin(b = 4)),
+      axis.title       = element_text(size = base_size, color = "grey25"),
+      axis.text        = element_text(size = base_size - 1, color = "grey35"),
+      panel.grid.major = element_line(color = accent_bg_col, linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      legend.text      = element_text(size = base_size - 1),
+      legend.title     = element_text(size = base_size),
+      legend.key.size  = unit(0.75, "lines"),
+      strip.text       = element_text(face = "italic", family = sp_font,
+                                      size = base_size, color = "grey20"),
+      plot.margin      = margin(6, 8, 6, 6)
+    )
+}
+
+# species palette: viridis D, one color per species
+n_species <- length(unique(data$class))
+pal <- setNames(viridisLite::viridis(n_species, option = "D", begin = 0.05, end = 0.92),
+                sort(unique(data$class)))
+
+# site palette: 2 viridis colors for site-level plots
+n_sites  <- length(unique(data$site))
+site_pal <- setNames(viridisLite::viridis(max(n_sites, 2), option = "D",
+                                          begin = 0.15, end = 0.75)[seq_len(n_sites)],
+                     sort(unique(data$zone)))
+
+# figure target width: 90% of A4 text column (16 cm) = 14.4 cm ≈ 5.67 in
+fig_w <- 5.67
 
 # --- 0. Sample sizes ---
 sample_sizes <- data %>%
@@ -224,7 +276,7 @@ print(sample_sizes)
 # ═══════════════════════════════════════════════════════════════════════════
 
 cover <- data %>%
-  group_by(plot_id, date, time_days) %>%
+  group_by(site, zone, plot_id, date, time_days) %>%
   summarise(
     total_area = sum(area, na.rm = TRUE),
     n_colonies = n_distinct(colony_id),
@@ -248,48 +300,57 @@ cover_trend <- data.frame(
   pct_cover = exp(predict(model_cover, newdata = ., re.form = NA))
 )
 
+# 95% CI from fixed-effects vcov (population-level, no random effect uncertainty)
+X_cover   <- model.matrix(~ time_days, data = cover_trend)
+pred_se_c <- sqrt(rowSums((X_cover %*% as.matrix(vcov(model_cover))) * X_cover))
+pred_log_c <- predict(model_cover, newdata = cover_trend, re.form = NA)
+cover_trend$pct_cover_lo <- exp(pred_log_c - 1.96 * pred_se_c)
+cover_trend$pct_cover_hi <- exp(pred_log_c + 1.96 * pred_se_c)
+
 # Plot C1: stacked species cover — shows total cover AND composition shift
 cover_sp_mean <- cover_sp %>%
   group_by(date, class) %>%
   summarise(mean_pct = mean(pct_cover_sp), .groups = "drop")
 
+# bar width: 70% of minimum survey-to-survey interval (days, matching Date scale)
+cover_bar_w <- as.numeric(median(diff(sort(unique(cover_sp_mean$date))))) * 0.7
+
 pC1 <- ggplot(cover_sp_mean, aes(x = date, y = mean_pct, fill = class)) +
-  geom_area(alpha = 0.88, color = "white", linewidth = 0.25) +
+  geom_col(alpha = 0.85, width = cover_bar_w) +
   scale_fill_manual(values = pal) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
   scale_y_continuous(labels = \(x) paste0(x, "%"),
                      expand = expansion(mult = c(0, 0.03))) +
-  labs(x = NULL, y = "Mean coral cover (% of 25 m²)", fill = NULL,
+  labs(x = NULL, y = "Mean cover (% of 25 m²)", fill = NULL,
        title = "Species composition of total coral cover over time") +
-  theme_minimal(base_size = 11) +
-  theme(legend.position  = "bottom",
-        legend.text      = element_text(face = "italic", size = 8),
-        panel.grid.minor = element_blank())
+  theme_coral() +
+  theme(legend.position = "bottom",
+        legend.text     = element_text(face = "italic", family = sp_font)) +
+  guides(fill = guide_legend(ncol = 3))
 
 # Plot C2: per-plot cover trajectories with model trend line
 pC2 <- ggplot(cover, aes(x = date, y = pct_cover)) +
-  geom_line(aes(group = plot_id, color = plot_id), alpha = 0.55, linewidth = 0.9) +
-  geom_point(aes(color = plot_id), size = 2.2, alpha = 0.8) +
+  geom_line(aes(group = plot_id, color = zone), alpha = 0.45, linewidth = 0.8) +
+  geom_point(aes(color = zone), size = 1.8, alpha = 0.75) +
   geom_ribbon(data = cover_trend,
-              aes(x = date, ymin = pct_cover * 0.85, ymax = pct_cover * 1.15),
-              inherit.aes = FALSE, alpha = 0.12, fill = "grey30") +
+              aes(x = date, ymin = pct_cover_lo, ymax = pct_cover_hi),
+              inherit.aes = FALSE, alpha = 0.10, fill = accent_col) +
   geom_line(data = cover_trend, aes(x = date, y = pct_cover),
-            inherit.aes = FALSE, color = "grey15", linewidth = 1.5) +
+            inherit.aes = FALSE, color = "grey15", linewidth = 0.8) +
+  scale_color_manual(values = site_pal) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
   scale_y_continuous(labels = \(x) paste0(round(x, 1), "%")) +
-  labs(x = NULL, y = "Total coral cover (% of 25 m²)", color = "Plot",
+  labs(x = NULL, y = "Total cover (% of 25 m²)", color = "Site",
        title = "Total cover trajectory per plot",
-       subtitle = "Dark line = LMM-predicted trend  |  Band = ±15% envelope") +
-  theme_minimal(base_size = 11) +
-  theme(panel.grid.minor = element_blank())
+       subtitle = "Dark line = LMM trend  |  Band = 95% CI") +
+  theme_coral() +
+  theme(legend.position = "bottom")
 
 p_community <- pC1 / pC2 +
-  plot_layout(heights = c(1, 1)) +
-  plot_annotation(
-    title = "Community coral cover — Farallon site (S2P2)",
-    theme = theme(plot.title = element_text(face = "bold", size = 13))
-  )
+  plot_layout(heights = c(1, 1))
 print(p_community)
 ggsave(file.path(plots_dir, "01_community_cover.jpeg"), p_community,
-       width = 11.69, height = 8, dpi = 300, units = "in")
+       width = fig_w, height = 4.5, dpi = 300, units = "in")  # 2 stacked time-series
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -316,41 +377,37 @@ resid_df <- data.frame(
 # residuals vs fitted: checks linearity and homoscedasticity
 # expect random scatter around zero with no trend or funnel shape
 pa <- ggplot(resid_df, aes(x = fitted, y = residuals)) +
-  geom_point(alpha = 0.25, size = 0.8) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
-  geom_smooth(method = "loess", se = FALSE, color = pal[[3]], linewidth = 0.8) +
+  geom_point(alpha = 0.20, size = 0.7, color = "grey40") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = accent_col, linewidth = 0.5) +
+  geom_smooth(method = "loess", se = FALSE, color = accent_col, linewidth = 0.8) +
   labs(x = "Fitted values", y = "Residuals", title = "Residuals vs Fitted") +
-  theme_minimal()
+  theme_coral()
 
-# QQ plot of residuals: checks normality of residuals
-# expect points to fall along the line
 pb <- ggplot(resid_df, aes(sample = residuals)) +
-  stat_qq(alpha = 0.3, size = 0.8) +
-  stat_qq_line(color = pal[[3]]) +
+  stat_qq(alpha = 0.25, size = 0.7, color = "grey40") +
+  stat_qq_line(color = accent_col, linewidth = 0.7) +
   labs(x = "Theoretical quantiles", y = "Sample quantiles",
        title = "Normal Q-Q — residuals") +
-  theme_minimal()
+  theme_coral()
 
-# scale-location plot: second check for homoscedasticity
-# expect flat smoother (constant spread across fitted range)
 pc <- ggplot(resid_df, aes(x = fitted, y = sqrt_abs_resid)) +
-  geom_point(alpha = 0.25, size = 0.8) +
-  geom_smooth(method = "loess", se = FALSE, color = pal[[3]], linewidth = 0.8) +
+  geom_point(alpha = 0.20, size = 0.7, color = "grey40") +
+  geom_smooth(method = "loess", se = FALSE, color = accent_col, linewidth = 0.8) +
   labs(x = "Fitted values", y = "√|Residuals|", title = "Scale-Location") +
-  theme_minimal()
+  theme_coral()
 
-# QQ plot of colony random effects: checks normality assumption for random intercepts
 re_vals <- ranef(model_base)$colony_id[, 1]
 pd <- ggplot(data.frame(re = re_vals), aes(sample = re)) +
-  stat_qq(alpha = 0.4, size = 0.8) +
-  stat_qq_line(color = pal[[3]]) +
+  stat_qq(alpha = 0.3, size = 0.7, color = "grey40") +
+  stat_qq_line(color = accent_col, linewidth = 0.7) +
   labs(x = "Theoretical quantiles", y = "Sample quantiles",
-       title = "Normal Q-Q — random effects (colony)") +
-  theme_minimal()
+       title = "Q-Q: random effects (colony)") +
+  theme_coral()
 
-print((pa | pb) / (pc | pd) +
-  plot_annotation(title = "LMM assumption checks",
-                  theme = theme(plot.title = element_text(face = "bold"))))
+p_assumptions <- (pa | pb) / (pc | pd)
+print(p_assumptions)
+ggsave(file.path(plots_dir, "00_lmm_assumption_checks.jpeg"), p_assumptions,
+       width = fig_w, height = 4.0, dpi = 300, units = "in")
 
 
 # model 1b: species x size_z interaction — only run if size_z is significant in model_base
@@ -358,6 +415,7 @@ print((pa | pb) / (pc | pd) +
 size_pvals <- coef(summary(model_base))
 size_pvals <- size_pvals[grep("size_z", rownames(size_pvals)), "Pr(>|t|)"]
 
+ran_crossed <- FALSE
 if (any(size_pvals < 0.05, na.rm = TRUE)) {
   message("size_z significant — running crossed model (species x size_z)")
   model_crossed <- lmer(
@@ -366,6 +424,7 @@ if (any(size_pvals < 0.05, na.rm = TRUE)) {
     data = data
   )
   summary(model_crossed)
+  ran_crossed <- TRUE
 } else {
   message("size_z not significant — crossed model skipped")
 }
@@ -399,7 +458,10 @@ traj_grid <- expand.grid(
   class     = levels(data$class),
   time_days = seq(min(data$time_days), max(data$time_days), length.out = 60),
   size_z    = 0   # average initial size
-) %>%
+)
+# predict() needs all fixed-effect variables; add reference site when multi-site
+if (multi_site) traj_grid$site <- levels(factor(data$site))[1]
+traj_grid <- traj_grid %>%
   mutate(
     date      = date_origin + time_days,
     pred_area = exp(predict(model_base, newdata = ., re.form = NA))
@@ -410,74 +472,75 @@ obs_summary <- data %>%
   summarise(mean_area = mean(area), se_area = sd(area) / sqrt(n()), .groups = "drop")
 
 pG1 <- ggplot() +
-  geom_ribbon(data = traj_grid,
-              aes(x = date, ymin = pred_area * 0.7, ymax = pred_area * 1.3, fill = class),
-              alpha = 0.15) +
   geom_line(data = traj_grid,
             aes(x = date, y = pred_area, color = class),
-            linewidth = 1.1) +
+            linewidth = 1.0) +
   geom_pointrange(data = obs_summary,
                   aes(x = date, y = mean_area,
                       ymin = mean_area - se_area, ymax = mean_area + se_area,
                       color = class),
-                  size = 0.35, alpha = 0.75) +
+                  size = 0.3, alpha = 0.7) +
   scale_color_manual(values = pal, guide = "none") +
-  scale_fill_manual(values = pal, guide = "none") +
-  facet_wrap(~ class, scales = "free_y", ncol = 3) +
-  labs(x = NULL, y = "Mean colony area (cm²)",
+  scale_x_date(date_breaks = "1 year", date_labels = "'%y") +
+  facet_wrap(~ class, scales = "free_y", ncol = 3,
+             labeller = label_wrap_gen(width = 16)) +
+  labs(x = NULL, y = "Colony area (cm²)",
        title = "Species growth trajectories",
-       subtitle = "Line = LMM prediction at mean initial size  |  Points = observed mean ± SE  |  Band = ±30%") +
-  theme_minimal(base_size = 10) +
-  theme(strip.text = element_text(face = "italic", size = 8))
+       subtitle = "Line = LMM prediction at mean size  |  Points = observed mean ± SE") +
+  theme_coral()
 
 # Plot G2: per-species log-area growth rate from model coefficients
+# SE for non-reference species requires propagating variance of PAST slope + interaction:
+# Var(a+b) = Var(a) + Var(b) + 2*Cov(a,b)
+vcov_base  <- vcov(model_base)
+past_var   <- vcov_base["time_days", "time_days"]
+
 growth_coefs <- as.data.frame(coef(summary(model_base))) %>%
   mutate(term = rownames(.)) %>%
   filter(grepl("^time_days", term), !grepl("size_z", term)) %>%
   mutate(
-    class     = ifelse(term == "time_days", "Porites astreoides",
-                       gsub("time_days:class", "", term)),
-    se        = `Std. Error`,
-    p         = `Pr(>|t|)`,
-    sig       = dplyr::case_when(p < 0.001 ~ "***", p < 0.01 ~ "**",
-                                 p < 0.05 ~ "*", TRUE ~ "ns")
+    class = ifelse(term == "time_days", "Porites astreoides",
+                   gsub("time_days:class", "", term)),
+    p     = `Pr(>|t|)`,
+    sig   = sig_stars(p)
   )
 
 past_slope <- growth_coefs$Estimate[growth_coefs$class == "Porites astreoides"]
-growth_coefs <- growth_coefs %>%
-  mutate(abs_slope = ifelse(class == "Porites astreoides", Estimate,
-                            Estimate + past_slope))
 
 growth_coefs <- growth_coefs %>%
   mutate(
-    pct_yr     = (exp(abs_slope * 365) - 1) * 100,
-    pct_yr_lo  = (exp((abs_slope - se) * 365) - 1) * 100,
-    pct_yr_hi  = (exp((abs_slope + se) * 365) - 1) * 100
+    abs_slope = ifelse(class == "Porites astreoides", Estimate, Estimate + past_slope),
+    abs_se    = ifelse(
+      class == "Porites astreoides",
+      `Std. Error`,
+      sqrt(past_var + `Std. Error`^2 + 2 * vcov_base[term, "time_days"])
+    ),
+    pct_yr    = (exp(abs_slope * 365) - 1) * 100,
+    pct_yr_lo = (exp((abs_slope - abs_se) * 365) - 1) * 100,
+    pct_yr_hi = (exp((abs_slope + abs_se) * 365) - 1) * 100
   )
 
 pG2 <- ggplot(growth_coefs,
               aes(x = reorder(class, pct_yr), y = pct_yr, color = class)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = accent_col, linewidth = 0.5) +
   geom_errorbar(aes(ymin = pct_yr_lo, ymax = pct_yr_hi),
-                width = 0.25, linewidth = 0.7) +
-  geom_point(size = 3.5) +
+                width = 0.22, linewidth = 0.65) +
+  geom_point(size = 3.2) +
   geom_text(aes(y = pct_yr_hi, label = sig),
-            vjust = -0.5, size = 3.8, color = "grey20") +
+            vjust = -0.5, size = 3.5, color = "grey30") +
   scale_color_manual(values = pal, guide = "none") +
   coord_flip() +
   labs(x = NULL, y = "Annual growth rate (% per year)",
        title = "Per-species annual growth rate",
-       subtitle = "Back-transformed from LMM: (exp(slope × 365) − 1) × 100  |  Positive = growing") +
-  theme_minimal() +
-  theme(axis.text.y = element_text(face = "italic"))
+       subtitle = "exp(slope × 365) − 1  |  Error bars = propagated SE") +
+  theme_coral() +
+  theme(axis.text.y = element_text(face = "italic", family = sp_font))
 
 p_growth <- pG1 / pG2 +
-  plot_layout(heights = c(2, 1)) +
-  plot_annotation(title = "Species growth trajectories",
-                  theme = theme(plot.title = element_text(face = "bold", size = 13)))
+  plot_layout(heights = c(2, 1))
 print(p_growth)
 ggsave(file.path(plots_dir, "02_species_growth_trajectories.jpeg"), p_growth,
-       width = 11.69, height = 9, dpi = 300, units = "in")
+       width = fig_w, height = 5.5, dpi = 300, units = "in")  # 3-row facet grid + bar
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -500,13 +563,21 @@ turnover <- data %>%
   ) %>%
   ungroup()
 
+# aggregate per-colony first so each colony gets equal weight regardless of survey count
 turnover_sp <- turnover %>%
-  group_by(class) %>%
+  group_by(colony_id, class) %>%
   summarise(
     mean_gained = mean(gained_pct),
     mean_lost   = mean(lost_pct),
     net_change  = mean(net_pct),
-    se_net      = sd(net_pct) / sqrt(n()),
+    .groups     = "drop"
+  ) %>%
+  group_by(class) %>%
+  summarise(
+    mean_gained = mean(mean_gained),
+    mean_lost   = mean(mean_lost),
+    net_change  = mean(net_change),
+    se_net      = sd(net_change) / sqrt(n()),
     .groups     = "drop"
   )
 
@@ -521,33 +592,37 @@ turnover_long <- turnover_sp %>%
 
 pT1 <- ggplot(turnover_long,
               aes(x = reorder(class, net_change, mean), y = pct_yr, fill = direction)) +
-  geom_col(width = 0.6, alpha = 0.88) +
+  geom_col(width = 0.55, alpha = 0.85) +
   geom_point(data = turnover_sp,
              aes(x = reorder(class, net_change, mean), y = net_change),
-             inherit.aes = FALSE, size = 3.2, color = "grey10") +
+             inherit.aes = FALSE, size = 2.8, color = "grey10") +
   geom_errorbar(data = turnover_sp,
                 aes(x = reorder(class, net_change, mean),
                     ymin = net_change - se_net, ymax = net_change + se_net),
-                inherit.aes = FALSE, width = 0.2, linewidth = 0.7, color = "grey10") +
-  geom_hline(yintercept = 0, linewidth = 0.6) +
-  scale_fill_manual(values = c("Gained" = "#7fba84", "Lost" = "#c8706b")) +
+                inherit.aes = FALSE, width = 0.18, linewidth = 0.65, color = "grey10") +
+  geom_hline(yintercept = 0, color = accent_col, linewidth = 0.55) +
+  scale_fill_manual(values = c(
+    "Gained" = viridisLite::viridis(4, option = "D")[3],
+    "Lost"   = viridisLite::viridis(4, option = "D")[1]
+  )) +
   coord_flip() +
   labs(x = NULL, y = "Mean annual change (% of colony area per year)", fill = NULL,
        title = "Growth vs. tissue loss balance per species",
-       subtitle = "Bars = mean % area gained/lost per year  |  Dot = net change ± SE") +
-  theme_minimal() +
-  theme(axis.text.y = element_text(face = "italic"), legend.position = "top")
+       subtitle = "Bars = mean gained/lost per year  |  Dot = net change ± SE") +
+  theme_coral() +
+  theme(axis.text.y  = element_text(face = "italic", family = sp_font),
+        legend.position = "none")
 
 print(pT1)
 ggsave(file.path(plots_dir, "03_turnover_balance.jpeg"), pT1,
-       width = 11.69, height = 5, dpi = 300, units = "in")
+       width = fig_w, height = 3.8, dpi = 300, units = "in")  # 8-species horiz bars
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 3 — INITIAL SIZE AS EXPLANATORY FACTOR
 # ═══════════════════════════════════════════════════════════════════════════
 
-pal_size <- setNames(wesanderson::wes_palette("Moonrise3")[c(1, 3, 5)],
+pal_size <- setNames(viridisLite::viridis(3, option = "D", begin = 0.1, end = 0.85),
                      c("small", "medium", "large"))
 
 # Plot S1: initial size vs empirical growth rate — visualises time_days:size_z interaction
@@ -573,38 +648,55 @@ growth_pred <- data.frame(size_z = seq(sz_range[1], sz_range[2], length.out = 60
   mutate(pred_pct = (exp((time_coef + time_size_coef * size_z) * 365) - 1) * 100)
 
 pS1 <- ggplot() +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey55") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = accent_col, linewidth = 0.5) +
   geom_point(data = colony_growth,
              aes(x = size_z, y = pct_growth_yr, color = class),
-             alpha = 0.45, size = 1.8) +
+             alpha = 0.40, size = 1.6) +
   geom_line(data = growth_pred,
             aes(x = size_z, y = pred_pct),
-            color = "grey10", linewidth = 1.2) +
+            color = accent_col, linewidth = 1.1) +
   scale_color_manual(values = pal, name = NULL) +
   labs(x = "Initial size z-score (within species)",
        y = "Growth rate (% per year)",
-       title = "Initial colony size vs. subsequent growth rate",
-       subtitle = "Larger colonies grow proportionally slower (ontogenetic slowdown)  |  Line = model (PAST reference)") +
-  theme_minimal() +
-  theme(legend.position = "top")
+       title = "Colony size vs. growth rate",
+       subtitle = "Larger initial colonies grow slower  |  Line = model (PAST)") +
+  theme_coral() +
+  theme(legend.position = "right",
+        legend.text = element_text(face = "italic", family = sp_font, size = 7))
 
-# Plot S2: size class composition per species
-pS2 <- ggplot(filter(data, !is.na(size_class)), aes(x = class, fill = size_class)) +
-  geom_bar(position = "fill", alpha = 0.88, width = 0.65) +
-  scale_fill_manual(values = pal_size, labels = c("Small", "Medium", "Large")) +
-  scale_y_continuous(labels = scales::percent_format()) +
+# Plot S2: size class composition per species — in-bar labels, no legend
+pS2_dat <- data %>%
+  filter(!is.na(size_class)) %>%
+  mutate(size_class = factor(size_class, levels = c("small", "medium", "large"))) %>%
+  count(class, size_class) %>%
+  group_by(class) %>%
+  arrange(size_class, .by_group = TRUE) %>%
+  mutate(prop = n / sum(n), mid = cumsum(prop) - prop / 2) %>%
+  ungroup()
+
+pS2 <- ggplot(pS2_dat, aes(x = class, y = prop, fill = size_class)) +
+  geom_col(alpha = 0.85, width = 0.6) +
+  geom_text(data = \(d) filter(d, prop >= 0.18),
+            aes(y = mid,
+                label = c(small = "S", medium = "M", large = "L")[size_class],
+                color = size_class),
+            size = 2.4, fontface = "bold") +
+  scale_fill_manual(values = pal_size) +
+  scale_color_manual(values = c(small = "white", medium = "white", large = "grey10"),
+                     guide = "none") +
+  scale_y_continuous(labels = scales::percent_format(),
+                     breaks = c(0, 0.5, 1)) +
   coord_flip() +
-  labs(x = NULL, y = "Proportion of observations", fill = "Initial size class",
-       title = "Initial size class composition per species") +
-  theme_minimal() +
-  theme(axis.text.y = element_text(face = "italic"), legend.position = "top")
+  labs(x = NULL, y = "Proportion", fill = NULL,
+       title = "Size distribution") +
+  guides(fill = "none") +
+  theme_coral() +
+  theme(axis.text.y = element_text(face = "italic", family = sp_font))
 
-p_size <- pS1 + pS2 +
-  plot_annotation(title = "Initial colony size as explanatory factor",
-                  theme = theme(plot.title = element_text(face = "bold")))
+p_size <- pS1 + pS2
 print(p_size)
 ggsave(file.path(plots_dir, "04_initial_size_effects.jpeg"), p_size,
-       width = 11.69, height = 5.5, dpi = 300, units = "in")
+       width = fig_w, height = 3.5, dpi = 300, units = "in")  # 2 side-by-side panels
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -627,12 +719,22 @@ pm_data <- data %>%
   ) %>%
   bind_rows(dead_terminal)
 
+# helper: warn if a (g)lmer model has a singular fit or optimizer convergence issues
+check_convergence <- function(model, name) {
+  if (isSingular(model))
+    warning(name, ": singular fit — random effect estimates unreliable")
+  msgs <- tryCatch(model@optinfo$conv$lme4$messages, error = function(e) NULL)
+  if (!is.null(msgs))
+    warning(name, ": convergence issue — ", paste(msgs, collapse = "; "))
+}
+
 # 4a. Occurrence
 model_pm_occurrence <- glmer(
   mortality_event ~ size_z + class + (1 | colony_id) + (1 | plot_id),
   data = pm_data, family = binomial
 )
 summary(model_pm_occurrence)
+check_convergence(model_pm_occurrence, "model_pm_occurrence")
 
 # 4b. Severity
 pm_events <- pm_data %>% filter(mortality_event == 1, partial_mortality > 0)
@@ -642,24 +744,16 @@ model_pm_severity <- lmer(
   data = pm_events
 )
 summary(model_pm_severity)
+check_convergence(model_pm_severity, "model_pm_severity")
 
 # 4c. Colony fate
-fate_summary <- data %>%
-  filter(!is.na(size_class)) %>%
-  distinct(colony_id, size_class, class, colony_fate) %>%
-  group_by(class, size_class, colony_fate) %>%
-  summarise(n = n(), .groups = "drop") %>%
-  group_by(class, size_class) %>%
-  mutate(prop = n / sum(n)) %>%
-  ungroup()
-
 fate_data <- data %>%
   filter(!is.na(size_z)) %>%
   distinct(colony_id, class, site, plot_id, size_z, size_class, colony_fate) %>%
   mutate(fate_binary = as.integer(colony_fate == "died"))
 
-model_fate <- glmer(
-  as.formula(paste("fate_binary ~ size_z + class", site_term, "+ (1 | plot_id)")),
+model_fate <- glm(
+  as.formula(paste("fate_binary ~ size_z + class", site_term)),
   data = fate_data, family = binomial
 )
 summary(model_fate)
@@ -675,18 +769,18 @@ cld_fate_class_plot <- as.data.frame(cld_fate_class) %>% mutate(.group = trimws(
 # Plot M1: survival probability by species (Tukey CLD)
 pM1 <- ggplot(cld_fate_class_plot,
               aes(x = reorder(class, prob), y = prob, color = class)) +
-  geom_point(size = 3.5) +
-  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.3, linewidth = 0.7) +
+  geom_point(size = 3.0) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.25, linewidth = 0.65) +
   geom_text(aes(y = asymp.UCL, label = .group),
-            hjust = -0.4, size = 4.5, color = "grey25", fontface = "bold") +
+            hjust = -0.4, size = 4.0, color = "grey30", fontface = "bold") +
   scale_color_manual(values = pal, guide = "none") +
   scale_y_continuous(labels = scales::percent_format(),
                      expand = expansion(mult = c(0.05, 0.2))) +
   coord_flip() +
   labs(x = NULL, y = "P(complete colony death)",
-       title = "Complete mortality risk by species (Tukey post-hoc)") +
-  theme_minimal() +
-  theme(axis.text.y = element_text(face = "italic"))
+       title = "Colony mortality risk by species") +
+  theme_coral() +
+  theme(axis.text.y = element_text(face = "italic", family = sp_font))
 
 # Plot M2: size_z → % area lost (partial + complete mortality combined)
 sev_grid <- data.frame(
@@ -696,52 +790,123 @@ sev_grid <- data.frame(
 ) %>% mutate(pred_pct = exp(predict(model_pm_severity, newdata = ., re.form = NA)))
 
 pM2 <- ggplot() +
-  geom_hline(yintercept = 100, linetype = "dashed", color = "grey55", linewidth = 0.5) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = accent_col, linewidth = 0.5) +
   geom_jitter(data = pm_events,
               aes(x = size_z, y = partial_mortality, color = event_type),
-              alpha = 0.45, width = 0.05, height = 0, size = 1.6) +
+              alpha = 0.40, width = 0.05, height = 0, size = 1.4) +
   geom_line(data = sev_grid,
             aes(x = size_z, y = pred_pct),
-            color = "grey15", linewidth = 1.2) +
+            color = accent_col, linewidth = 1.1) +
   scale_color_manual(
-    values = c("partial mortality" = "#c8706b", "complete death" = "#3d2b1f"),
+    values = c("partial mortality" = accent_bg_col, "complete death" = "#3d2b1f"),
     labels = c("partial mortality" = "Partial mortality", "complete death" = "Complete death (100%)")
   ) +
   scale_y_continuous(labels = \(x) paste0(x, "%"), limits = c(0, 108)) +
   labs(x = "Initial size z-score (within species)", y = "Area lost (%)",
        color = NULL,
-       title = "Size effect on mortality severity",
-       subtitle = "Line = LMM prediction (reference: PAST)  |  Dashed = complete colony death threshold") +
-  theme_minimal() +
-  theme(legend.position = "top")
+       title = "Mortality severity by size",
+       subtitle = "Line = LMM (PAST)  |  Dashed = 100% death") +
+  theme_coral() +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 7)) +
+  guides(color = guide_legend(nrow = 2))
 
-p_mortality <- (pM1 | pM2) +
-  plot_annotation(title = "Colony mortality risk — species and initial size",
-                  theme = theme(plot.title = element_text(face = "bold", size = 13)))
+p_mortality <- (pM1 | pM2)
 print(p_mortality)
 ggsave(file.path(plots_dir, "05_mortality_risk.jpeg"), p_mortality,
-       width = 11.69, height = 5.5, dpi = 300, units = "in")
+       width = fig_w, height = 3.5, dpi = 300, units = "in")  # 2 side-by-side panels
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 6 — SITE COMPARISON
+# only produced when data contains more than one site
+# ═══════════════════════════════════════════════════════════════════════════
+
+if (multi_site) {
+
+  # per-plot cover → per-site mean ± SE
+  cover_site <- data %>%
+    group_by(site, zone, plot_id, date) %>%
+    summarise(total_area = sum(area, na.rm = TRUE), .groups = "drop") %>%
+    mutate(pct_cover = total_area / PLOT_AREA_CM2 * 100) %>%
+    group_by(zone, date) %>%
+    summarise(mean_pct = mean(pct_cover), se_pct = sd(pct_cover) / sqrt(n()),
+              .groups = "drop")
+
+  pSC1 <- ggplot(cover_site, aes(x = date, y = mean_pct, color = zone, fill = zone)) +
+    geom_ribbon(aes(ymin = mean_pct - se_pct, ymax = mean_pct + se_pct),
+                alpha = 0.15, color = NA) +
+    geom_line(linewidth = 1.1) +
+    geom_point(size = 2.0) +
+    scale_color_manual(values = site_pal) +
+    scale_fill_manual(values  = site_pal, guide = "none") +
+    scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
+    scale_y_continuous(labels = \(x) paste0(round(x, 1), "%")) +
+    labs(x = NULL, y = "Total cover (% of 25 m²)", color = NULL,
+         title = "Total coral cover over time",
+         subtitle = "Mean ± SE across plots") +
+    theme_coral() +
+    theme(legend.position = "top")
+
+  # species composition per site: proportion of colonies
+  sp_site <- data %>%
+    distinct(colony_id, zone, class) %>%
+    count(zone, class, name = "n_colonies") %>%
+    group_by(zone) %>%
+    mutate(prop = n_colonies / sum(n_colonies)) %>%
+    ungroup()
+
+  pSC2 <- ggplot(sp_site, aes(x = zone, y = prop, fill = class)) +
+    geom_col(width = 0.5, alpha = 0.88) +
+    scale_fill_manual(values = pal) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    coord_flip() +
+    labs(x = NULL, y = "Proportion of colonies", fill = NULL,
+         title = "Species composition by site") +
+    theme_coral() +
+    theme(legend.text     = element_text(face = "italic", family = sp_font, size = 7),
+          legend.position = "bottom") +
+    guides(fill = guide_legend(ncol = 3))
+
+  # initial size distribution per site
+  init_size_site <- data %>%
+    group_by(colony_id, zone) %>%
+    slice_min(date, n = 1, with_ties = FALSE) %>%
+    ungroup()
+
+  pSC3 <- ggplot(init_size_site, aes(x = zone, y = log(area), color = zone, fill = zone)) +
+    geom_violin(alpha = 0.18, linewidth = 0.55, trim = FALSE) +
+    geom_boxplot(width = 0.12, alpha = 0.85, outlier.shape = NA, linewidth = 0.5) +
+    scale_color_manual(values = site_pal, guide = "none") +
+    scale_fill_manual(values  = site_pal, guide = "none") +
+    labs(x = NULL, y = "log(colony area, cm²)",
+         title = "Initial colony size distribution") +
+    theme_coral()
+
+  p_site_cmp <- pSC2 / (pSC1 | pSC3) +
+    plot_layout(heights = c(0.7, 1.3))  # bar chart on top is content-light
+  print(p_site_cmp)
+  ggsave(file.path(plots_dir, "07_site_comparison.jpeg"), p_site_cmp,
+         width = fig_w, height = 4.5, dpi = 300, units = "in")  # 3-panel composite
+
+} else {
+  message("Single site — site comparison plot skipped")
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # APPENDIX — SPECIES BIOLOGY (mean size, Tukey CLD)
 # ═══════════════════════════════════════════════════════════════════════════
 
-# post-hoc species mean size
-em_class    <- emmeans::emmeans(model_base, ~ class)
-pairs_class <- pairs(em_class, adjust = "tukey")
-cld_class   <- multcomp::cld(em_class, adjust = "tukey", Letters = letters, reversed = TRUE)
-print(pairs_class)
-
-cld_class_plot <- as.data.frame(cld_class) %>%
-  mutate(mean_area = exp(emmean), lower = exp(lower.CL), upper = exp(upper.CL),
-         .group = trimws(.group))
-
-sig_mean_size <- c(
-  "Pseudodiploria strigosa"    = "**",
-  "Siderastrea siderea"       = "***",
-  "Stephanocoenia intersepta" = "***"
-)
+# sig_mean_size: derive significance vs PAST from pairs already computed in Section 1c
+sig_mean_size <- as.data.frame(pairs_class) %>%
+  filter(grepl("Porites astreoides", contrast)) %>%
+  mutate(
+    other_sp = trimws(gsub("Porites astreoides - | - Porites astreoides", "", contrast)),
+    stars    = sig_stars(p.value)
+  ) %>%
+  filter(stars != "") %>%
+  { setNames(.$stars, .$other_sp) }
 
 # per-cell: mean area and n colonies
 size_means <- data %>%
@@ -758,12 +923,13 @@ species_n_total <- size_means %>%
   group_by(class) %>%
   summarise(n_sp = sum(n_colonies), .groups = "drop")
 
-# size-class total row: mean of species means + total n per size class
-sizeclass_totals <- size_means %>%
+# size-class total row: grand mean from raw observations (not mean of species means)
+sizeclass_totals <- data %>%
+  filter(!is.na(size_class)) %>%
   group_by(size_class) %>%
   summarise(
-    mean_area  = mean(mean_area, na.rm = TRUE),
-    n_colonies = sum(n_colonies),
+    mean_area  = mean(area, na.rm = TRUE),
+    n_colonies = n_distinct(colony_id),
     class      = "All species",
     .groups    = "drop"
   )
@@ -805,46 +971,39 @@ sep_y <- length(sp_label_order) + 0.5
 p3 <- ggplot(size_plot_data,
              aes(x = size_class, y = class_label, size = mean_area, color = class)) +
   geom_hline(yintercept = sep_y, linetype = "dashed",
-             color = "grey65", linewidth = 0.4) +
+             color = accent_bg_col, linewidth = 0.5) +
   geom_point(alpha = 0.85) +
-  geom_text(aes(label = n_colonies), size = 2.6, color = "white", fontface = "bold") +
+  geom_text(aes(label = n_colonies), size = 2.5, color = "black", fontface = "bold") +
   geom_text(aes(label = ifelse(!is.na(mean_area), paste0(round(mean_area), " cm²"), "")),
-            vjust = 3.2, size = 2.3, color = "grey35") +
+            vjust = 3.2, size = 2.2, color = "black") +
   scale_size_area(max_size = 22, guide = "none") +
   scale_color_manual(values = dot_colors, guide = "none") +
   labs(x = "Initial size class", y = NULL,
-       title = "Mean colony area by species and initial size class",
-       subtitle = "Circle labels: n colonies per cell  |  Below circles: mean area  |  Top row: size-class totals") +
-  theme_minimal() +
-  theme(
-    axis.text.y = element_text(
-      face   = c(rep("italic", length(sp_label_order)), "bold"),
-      colour = c(rep("grey20", length(sp_label_order)), "grey40")
-    )
-  )
+       title = "Colony area by species and size class",
+       subtitle = "Circle labels: n colonies  |  Below: mean area") +
+  theme_coral() +
+  theme(axis.text.y = element_text(face = "italic", family = sp_font, colour = "grey20"))
 
 # Appendix plot A2: Tukey CLD for species mean size
 pA2 <- ggplot(cld_class_plot,
               aes(x = reorder(class, mean_area), y = mean_area, color = class)) +
-  geom_point(size = 3.5) +
-  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.3, linewidth = 0.7) +
+  geom_point(size = 3.0) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.25, linewidth = 0.65) +
   geom_text(aes(y = upper, label = .group),
-            hjust = -0.4, size = 4.5, color = "grey25", fontface = "bold") +
+            hjust = -0.4, size = 4.0, color = "grey30", fontface = "bold") +
   scale_color_manual(values = pal, guide = "none") +
   scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
   coord_flip() +
   labs(x = NULL, y = "Estimated mean area (cm²)",
-       title = "Appendix: pairwise species size comparison (Tukey)",
+       title = "Pairwise species size comparison (Tukey)",
        subtitle = "Shared letter = not significantly different  |  Geometric mean ± 95% CI") +
-  theme_minimal() +
-  theme(axis.text.y = element_text(face = "italic"))
+  theme_coral() +
+  theme(axis.text.y = element_text(face = "italic", family = sp_font))
 
-p_appendix <- p3 + pA2 +
-  plot_annotation(title = "Species biology reference",
-                  theme = theme(plot.title = element_text(face = "bold")))
+p_appendix <- p3 + pA2
 print(p_appendix)
 ggsave(file.path(plots_dir, "06_appendix_species_size.jpeg"), p_appendix,
-       width = 11.69, height = 6.5, dpi = 300, units = "in")
+       width = fig_w, height = 4.0, dpi = 300, units = "in")  # bubble matrix needs y-room
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -891,17 +1050,6 @@ extract_pairs <- function(pairs_obj, source, response) {
   )
 }
 
-# significance labels
-sig_stars <- function(p) {
-  dplyr::case_when(
-    p < 0.001 ~ "***",
-    p < 0.01  ~ "**",
-    p < 0.05  ~ "*",
-    p < 0.1   ~ ".",
-    TRUE      ~ ""
-  )
-}
-
 # collect all results
 results_all <- bind_rows(
   extract_fixed(model_cover,         "LMM: total cover trend",    "log(% cover)"),
@@ -915,8 +1063,8 @@ results_all <- bind_rows(
   mutate(sig = sig_stars(p_value)) %>%
   dplyr::arrange(source, p_value)
 
-# also add crossed model if it was fitted
-if (exists("model_crossed")) {
+# also add crossed model if it was fitted this run
+if (ran_crossed) {
   results_all <- bind_rows(
     results_all,
     extract_fixed(model_crossed, "LMM: growth (species x size)", "log(area)") %>%
@@ -928,9 +1076,10 @@ if (exists("model_crossed")) {
 results_sig <- results_all %>%
   filter(p_value < 0.05) %>%
   dplyr::select(source, response, type, term, estimate, se, statistic, p_value, sig) %>%
-  mutate(power_note = ifelse(
-    sapply(term, function(t) any(sapply(low_power_spp, function(sp) grepl(sp, t, fixed = TRUE)))),
-    "low power", ""
+  mutate(power_note = dplyr::case_when(
+    sapply(term, function(t) any(sapply(very_low_power_spp, function(sp) grepl(sp, t, fixed = TRUE)))) ~ "very low power (n 5-9)",
+    sapply(term, function(t) any(sapply(low_power_spp,      function(sp) grepl(sp, t, fixed = TRUE)))) ~ "low power (n 10-25)",
+    TRUE ~ ""
   ))
 
 print(results_sig)
