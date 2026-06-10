@@ -763,6 +763,16 @@ if (multi_site) {
       .groups = "drop"
     )
 
+  # Inferential test of the site effect shown in plot 07 (right panel): does
+  # partial-mortality severity differ by site, and does its trend over time differ?
+  # LMM on individual partial events (complete deaths excluded), mirroring the
+  # time_sc * zone structure of the visualisation GLM below.
+  model_pm_severity_site <- lmer(
+    log(partial_mortality) ~ time_sc * zone + (1 | plot_id) + (1 | colony_id),
+    data = pm_partial
+  )
+  summary(model_pm_severity_site)
+
   # GLM on per-plot means so predictions match the arithmetic mean shown in points
   model_mortality_site_traj <- glm(
     mean_pm ~ time_sc * zone,
@@ -892,6 +902,7 @@ if (multi_site) {
     results_all,
     extract_fixed(model_cover_site,  "GLMM: site cover (Gamma)",         "pct_cover [log link]"),
     extract_fixed(model_growth_site, "GLMM: growth by site (Gamma)",     "area [log link]"),
+    extract_fixed(model_pm_severity_site, "LMM: mortality severity by site", "log(% area lost)"),
     extract_fixed(model_fate,        "GLMM: colony fate",   "P(colony died)"),
     data.frame(
       source    = "chi-square: species composition by site",

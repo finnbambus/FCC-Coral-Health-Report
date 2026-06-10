@@ -18,6 +18,7 @@
 | GLM: colony fate | `glm` (binomial) | P(colony died) | `size_z + class + site` | — |
 | GLMM: site cover | `glmer` (Gamma) | `pct_cover` [log link] | `time_sc × zone` | `(1\|plot_id)` |
 | GLMM: growth by site | `glmer` (Gamma) | `area` [log link] | `time_sc × zone` | `(1\|colony_id)` |
+| LMM: mortality severity by site | `lmer` | `log(% area lost)` | `time_sc × zone` | `(1\|plot_id) + (1\|colony_id)` |
 | Chi-square: species composition | `chisq.test` | colony counts | by site × species | — |
 | Wilcoxon: initial size by site | `wilcox.test` | `log(area)` | by site | — |
 
@@ -27,7 +28,7 @@ Colonies with observation gaps (present → absent → present) were excluded pr
 The two **growth models** (colony growth GLMM and growth-by-size LMM) are fitted to follow-up observations only — each colony's baseline survey is dropped from the response so that the baseline-derived `size_z` is not also part of the outcome, avoiding a regression-to-the-mean inflation of the size terms (n = 947 obs, 264 colonies after exclusion).
 Colony abundance (per species and per site) is modelled with a **Poisson GLMM** (log link) on a zero-filled plot × date × species grid; these are descriptive trend models and are not included in the inference table below.
 
-**Trajectory visualisation models** (02a, 02d, 03c, 03d) use separate `glm(Gamma)` fitted on per-plot arithmetic means — these match the plotted points and are not used for inference. The partial-mortality severity model uses partial events only (complete deaths excluded).
+**Trajectory visualisation models** (02a, 02d, 03c, 03d) use separate `glm(Gamma)` fitted on per-plot arithmetic means — these match the plotted points and are not used for inference. The partial-mortality severity models use partial events only (complete deaths excluded). The trend line in plot 07 (right panel) is one such visualisation GLM; its inferential counterpart is the **mortality severity by site** LMM below.
 
 ---
 
@@ -121,6 +122,19 @@ Colony abundance (per species and per site) is modelled with a **Poisson GLMM** 
 
 ---
 
+### Mortality severity by site — LMM (partial events only; zone ref = Farallon)
+
+| Term | Estimate | SE | t | p | sig |
+|------|----------|----|---|---|-----|
+| (Intercept) | 2.321 | 0.250 | 9.30 | <0.001 | *** |
+| zoneJuanillo | 1.041 | 0.426 | 2.45 | 0.022 | * |
+| time_sc | 0.052 | 0.051 | 1.01 | 0.313 | |
+| time_sc:zoneJuanillo | −0.149 | 0.092 | −1.62 | 0.106 | |
+
+> **Read:** Inferential test of the site contrast shown in plot 07 (right panel). When a partial-mortality event occurs, Juanillo colonies lose significantly more tissue than Farallon colonies (exp(1.041) ≈ 2.8× on the % scale, p = 0.022). Severity does not change significantly over time (time_sc p = 0.31), and the trend does not differ between sites (interaction p = 0.11). Complete deaths are excluded, so this measures the magnitude of partial tissue loss, not the rate of colony death (see colony fate model).
+
+---
+
 ### Species composition by site — Chi-square (Monte-Carlo)
 
 | Statistic | Value |
@@ -149,6 +163,7 @@ Colony abundance (per species and per site) is modelled with a **Poisson GLMM** 
 - **Total cover is increasing over time at Farallon** (time_sc p = 0.008); baseline cover does not differ significantly between sites and the site difference in trend is only marginal (interaction p = 0.052).
 - **Colony size is the dominant cross-model predictor:** larger initial size → larger area (~×2.8 per SD), slower relative growth (ontogenetic convergence), and lower complete mortality odds (OR = 0.37 per SD).
 - **Initial size does *not* predict partial-mortality severity** once complete deaths are excluded (size_z p = 0.36) — the earlier effect was driven by 100%-coded complete deaths.
+- **Partial-mortality severity is significantly higher at Juanillo than Farallon** (≈2.8× more tissue lost per partial event, p = 0.022); the severity trend over time does not differ between sites (interaction p = 0.11) — the inferential test behind plot 07.
 - **No species differs significantly from PAST in growth *rate*** (all time × species interactions n.s. on follow-up observations); the earlier SSID-acceleration and DLAB-deceleration findings do not survive removal of the baseline observation.
 - **OFAV starts significantly larger than PAST; CNAT, PPOR and PSTR start smaller** (baseline-size contrasts in the growth model).
 - **PPOR and CNAT carry the highest mortality risk** (both p ≤ 0.040 vs PAST in fate model).
